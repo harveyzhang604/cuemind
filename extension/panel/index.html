@@ -127,7 +127,7 @@
           <div id="empty" class="empty">
             <div class="empty-art"><i></i><i></i><i></i><b>▶</b></div>
             <h2>从一句，听懂一整个视频。</h2>
-            <p>打开 YouTube 或 Bilibili 视频，<br />点击「读取视频」开始你的精读。</p>
+            <p>打开 YouTube、Bilibili 或咪咕赛事视频，<br />点击「读取视频」开始你的精读。</p>
             <button id="start" class="primary">读取当前视频 <span>↗</span></button>
             <div class="empty-links">
               <button id="demo" class="text-btn">先体验示例</button
@@ -140,21 +140,24 @@
             </p>
           </div>
           <div id="asr-box" class="notice" hidden>
-            <strong>无字幕？生成原文字幕</strong>
+            <strong>无字幕？识别视频音频</strong>
             <p id="capture-summary" role="status"></p>
-            <p>从当前进度录制，每分钟自动生成一批字幕并继续。结束录音后保留已完成的字幕。</p>
+            <p>
+              直接提取当前视频正在播放的音频，由语音服务识别原文并生成时间戳。咪咕每次处理当前约 1
+              分钟，完成后回到起点查看双语字幕。中文译文由文本模型生成；已有结果保存在本机。
+            </p>
             <div class="row">
-              <button id="record" class="primary">录制当前视频并转写</button
+              <button id="record" class="primary">识别当前视频音频</button
               ><label class="button file-label"
                 >导入音频转写<input id="audio" type="file" accept="audio/*,video/*" hidden
               /></label>
             </div>
             <button id="configure-asr" class="text-btn">配置语音服务</button>
             <details class="capture-details">
-              <summary>录制说明与导入位置</summary>
+              <summary>音频识别与导入位置</summary>
               <p>
-                录音按 1×
-                实时播放；暂停或切换视频会结束录音，跳转或变速会丢弃当前音频块。再次录制建立独立记录，原字幕与笔记保留。
+                识别需要视频按 1×
+                实时播放，以便将语音和时间戳对齐；只提取音频，不保存视频画面。暂停或切换视频会结束本次识别，跳转或变速会丢弃当前音频块。识别其他位置前先移动播放进度；旧字幕与笔记仍保存在本机。
               </p>
               <label
                 >导入音频在视频中的起点（秒）<input
@@ -346,7 +349,7 @@
       <form method="dialog"><button class="close" aria-label="关闭导入">×</button></form>
       <h2 id="import-title">导入字幕与音频</h2>
       <p class="hint">导入内容建立独立记录，保留已有笔记。</p>
-      <button id="show-asr" class="button">录音或导入音频转写</button
+      <button id="show-asr" class="button">识别视频音频或导入文件</button
       ><button id="import-existing" class="button">导入 SRT / VTT 为独立学习记录</button
       ><label class="button file-label"
         >从备份恢复<input type="file" id="restore" accept=".json" hidden

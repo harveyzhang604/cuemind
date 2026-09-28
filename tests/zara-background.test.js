@@ -6,7 +6,7 @@ import {defaults} from '../extension/services/ai-provider.js';
 import {validateSettings} from '../extension/services/settings.js';
 import {normalizeCaptions,splitTimedCaptions,videoKey,SCHEMA_VERSION} from '../extension/core/transcript.js';
 import {localSentences,paragraphs} from '../extension/core/sentence.js';
-import {keyFromUrl} from '../extension/core/video.js';
+import {keyFromUrl,matchesVideoUrl} from '../extension/core/video.js';
 import {canReuseTranscript} from '../extension/services/platform.js';
 import {taskConflict} from '../extension/core/task-lock.js';
 import {clearLearningCache,dataActions} from '../extension/core/local-data.js';
@@ -14,13 +14,13 @@ import {recoverEquivalentLearning} from '../extension/core/record-recovery.js';
 import {selectFocusConfig} from '../extension/core/focus.js';
 import {explanationCacheKey} from '../extension/services/explanation-cache.js';
 async function fixture(existingStorage){
- const noop=()=>{},stores={videos:new Map(),notes:new Map(),chats:new Map()},storage=existingStorage||{settings:{...defaults,transcriptProvider:'supadata',supadataApiKey:'fixture'}};
+ const noop=()=>{},listeners=[],stores={videos:new Map(),notes:new Map(),chats:new Map()},storage=existingStorage||{settings:{...defaults,transcriptProvider:'supadata',supadataApiKey:'fixture'}};
  const inspection={info:{platform:'youtube',videoId:'sHieyY4r0-k',page:1,title:'Fixture',audioLanguage:'en',url:'https://www.youtube.com/watch?v=sHieyY4r0-k'},tracks:[]};
- const context={console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,defaults,validateSettings,normalizeCaptions,splitTimedCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,canReuseTranscript,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,inspection,
+ const context={console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,splitTimedCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,inspection,
  db:{get:async(name,id)=>structuredClone(stores[name].get(id)),all:async name=>structuredClone([...stores[name].values()]),put:async(name,value)=>{stores[name].set(value.id,structuredClone(value));return value;},remove:async(name,id)=>stores[name].delete(id),updateNote:async(id,expected,change)=>{const n=stores.notes.get(id);if(n?.updatedAt!==expected)return null;const next={...n,...change};stores.notes.set(id,structuredClone(next));return next;},manage:async(action,transform)=>{if(action==='reset'){Object.values(stores).forEach(s=>s.clear());}else if(action==='delete-notes')stores.notes.clear();else{stores.chats.clear();for(const [id,r]of stores.videos)stores.videos.set(id,transform(r));}}},
- chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},tabs:{get:async()=>({url:inspection.info.url}),sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{sendMessage:async()=>{},onMessage:{addListener:noop}}}};
+ chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},tabs:{get:async()=>({url:inspection.info.url}),sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
  context.cachedCompletion=(...args)=>context.completion(...args.slice(0,5));
- const source=(await readFile(new URL('../extension/background.js',import.meta.url),'utf8')).replace(/^import [\s\S]*?;\s*/gm,'');vm.createContext(context);vm.runInContext(source+'\npage=async()=>structuredClone(inspection);globalThis.router=route;',context);return {context,stores,storage,inspection,route:context.router};
+ const source=(await readFile(new URL('../extension/background.js',import.meta.url),'utf8')).replace(/^import [\s\S]*?;\s*/gm,'');vm.createContext(context);vm.runInContext(source+'\npage=async()=>structuredClone(inspection);globalThis.router=route;',context);return {context,stores,storage,inspection,listeners,route:context.router};
 }
 test('background Supadata load deduplicates requests, caches results, refresh keeps note provenance',async()=>{
  const f=await fixture();let calls=0;f.context.fetchSupadata=async()=>{calls++;return {raw:normalizeCaptions([{start:.179,end:2,text:'Exact words.'}],'supadata_native'),language:'en',availableLangs:['en']};};
@@ -134,4 +134,99 @@ test('update reconnects only supported video tabs and tolerates a closed tab',as
  assert.ok(injections.every(x=>x.files.length===1&&x.files[0]==='content/player.js'));
  assert.deepEqual(Array.from(results,r=>r.status),['fulfilled','fulfilled','rejected']);
  assert.equal(f.stores.notes.size,0);assert.equal(f.storage.settings.supadataApiKey,'fixture');
+});
+
+
+test('toolbar opens the workspace on unsupported tabs without enabling video processing', async () => {
+ const f = await fixture(), options = [], opened = [], behavior = [], listeners = {};
+ f.context.chrome.sidePanel = {
+  setPanelBehavior: value => behavior.push(value),
+  setOptions: async value => options.push(value),
+  open: async value => opened.push(value),
+  close: async () => { throw new Error('Workspace must remain available'); },
+ };
+ f.context.chrome.action.onClicked = {addListener: fn => {listeners.clicked = fn;}};
+ f.context.chrome.tabs.onActivated = {addListener: fn => {listeners.activated = fn;}};
+ f.context.chrome.tabs.onUpdated = {addListener: fn => {listeners.updated = fn;}};
+ f.context.chrome.tabs.get = async id => ({id, url: 'https://www.miguvideo.com/p/live/120000587094'});
+ const source = (await readFile(new URL('../extension/background.js', import.meta.url), 'utf8')).replace(/^import [\s\S]*?;\s*/gm, '');
+ vm.runInContext(source.slice(source.indexOf('chrome.storage.local.setAccessLevel'), source.indexOf('const notify =')), f.context);
+ assert.equal(behavior[0].openPanelOnActionClick, false);
+ listeners.clicked({id: 7, url: 'https://www.miguvideo.com/p/live/120000587094'});
+ assert.equal(opened[0].tabId, 7);
+ await listeners.activated({tabId: 7});
+ assert.equal(options[0].tabId, 7);
+ assert.equal(options[0].enabled, true);
+ await vm.runInContext("panelForTab({id: 7, url: 'https://www.youtube.com/watch?v=fixture'})", f.context);
+ assert.equal(options[1].enabled, true);
+ assert.equal(keyFromUrl('https://www.miguvideo.com/p/live/120000587094'), 'migu:120000587094:1');
+ assert.equal(f.stores.videos.size, 0);
+ assert.equal(f.stores.notes.size, 0);
+});
+
+
+test('Migu cache is isolated by programme and reuses imported/transcribed captions', async () => {
+ const f = await fixture();
+ f.inspection.info = {platform:'migu',videoId:'120000587094',page:967772705,title:'English main card',duration:11808,url:'https://www.miguvideo.com/p/live/120000587094'};
+ const first = await f.route({type:'LOAD',tabId:1});
+ assert.equal(first.needASR,true);
+ assert.equal(first.record.videoKey,'migu:120000587094:967772705');
+ assert.equal(first.record.focusConfig.overlay,true);
+ const raw = normalizeCaptions([{start:10,end:13,text:'The next round begins.'}], 'whisper');
+ const saved = await f.route({type:'IMPORT',info:f.inspection.info,raw});
+ assert.equal(saved.focusConfig.overlay,true);
+ f.inspection.info.duration = 0;
+ const restored = await f.route({type:'LOAD',tabId:1});
+ assert.equal(restored.record.id,saved.id);
+ assert.equal(restored.record.videoInfo.duration,11808);
+ f.inspection.info.page = 967772639;
+ const chinese = await f.route({type:'LOAD',tabId:1});
+ assert.equal(chinese.needASR,true);
+ assert.notEqual(chinese.record.videoKey,saved.videoKey);
+ assert.equal(chinese.record.rawCaptions.length,0);
+ assert.equal(matchesVideoUrl(saved.videoKey,'https://www.miguvideo.com/p/live/999'),false);
+ assert.equal(matchesVideoUrl(saved.videoKey,'https://evil.invalid/p/live/120000587094'),false);
+});
+
+test('Migu audio recognition continues after saved audio and reuses prior translations', async () => {
+ const f = await fixture(), seeks = [], playback = {time:10,duration:180,rate:1,paused:true,isAd:false};
+ f.inspection.info = {platform:'migu',videoId:'120000587094',page:967772705,title:'English main card',duration:180,url:'https://www.miguvideo.com/p/live/120000587094'};
+ const loaded = await f.route({type:'LOAD',tabId:1});
+ const prior = f.stores.videos.get(loaded.record.id);
+ prior.rawCaptions = normalizeCaptions([{start:10,end:13,text:'First round.'}], 'whisper');
+ prior.sentences = localSentences(prior.rawCaptions);
+ prior.sentences[0].translation = '第一回合。';
+ prior.paragraphs = paragraphs(prior.sentences);
+ prior.transcriptMeta = {...prior.transcriptMeta,source:'whisper',capturedUntil:70};
+ const cfg = f.storage.settings;
+ prior.tasks = {translation:{signature:JSON.stringify([cfg.provider,cfg.baseUrl,cfg.models?.translation||cfg.model,cfg.targetLanguage,cfg.prompts?.translation||'']),done:[0],failed:[]}};
+ f.stores.videos.set(prior.id,prior);
+ f.storage.settings = {...f.storage.settings,asrKey:'fixture-asr'};
+ f.context.player = async (_tabId, command) => {
+  if(command.action==='seek'){seeks.push(command.time);playback.time=command.time;}
+  if(command.action==='play')playback.paused=false;
+  if(command.action==='pause')playback.paused=true;
+  return {...playback,videoKey:prior.videoKey};
+ };
+ f.context.chrome.offscreen = {hasDocument:async()=>true};
+ f.context.chrome.tabCapture = {getMediaStreamId:async()=>'fixture-stream'};
+ f.context.chrome.runtime.sendMessage = async m => ({ok:true,data:m.type==='EVENT'?null:true});
+ const next = await f.route({type:'CAPTURE_START',recordId:prior.id,tabId:1});
+ assert.ok(seeks[0]>=70&&seeks[0]<71,'the saved minute must not be recognized again');
+ assert.equal(next.rawCaptions.length,1);
+ assert.equal(next.sentences[0].translation,'第一回合。');
+ const listener = f.listeners[0],sender={id:'fixture',url:'chrome-extension://fixture/offscreen/index.html'};
+ const event = m => new Promise((resolve,reject)=>{
+  const pending=listener(m,sender,reply=>reply?.ok?resolve(reply):reject(new Error(reply?.error||'missing reply')));
+  if(!pending)reject(new Error('event was not handled'));
+ });
+ await event({type:'ASR_CHUNK',recordId:next.id,segments:[{start:71,end:73,text:'Second round.'}],completed:1});
+ const saved = f.stores.videos.get(next.id);
+ assert.equal(saved.rawCaptions.length,2);
+ assert.equal(saved.sentences[0].translation,'第一回合。');
+ assert.equal(saved.sentences[1].rawText,'Second round.');
+ playback.time=130;
+ await event({type:'ASR_FINISHED',recordId:next.id});
+ assert.equal(f.stores.videos.get(next.id).transcriptMeta.capturedUntil,130);
+ assert.equal(seeks.at(-1),seeks[0],'after recognition the player returns to the new segment start');
 });

@@ -12,7 +12,7 @@ import { parseSubtitle, formatTime, timestampUrl } from '../core/transcript.js';
 import { activeIndex, studyGroups } from '../core/sentence.js';
 import { markdown, mindmap, outline, subtitles } from '../core/export.js';
 import { demoRecord } from './demo.js';
-import { keyFromUrl } from '../core/video.js';
+import { keyFromUrl, matchesVideoUrl } from '../core/video.js';
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const ext = !!globalThis.chrome?.runtime?.id;
@@ -92,6 +92,7 @@ async function maybeTranslateVideo() {
     !(focus.wantsTranslation || mode === 'bilingual' || mode === 'translated') ||
     !modelReady() ||
     busy ||
+    recording ||
     focus.busy ||
     record.id === automaticTranslationRecordId ||
     record.sentences.every((s) => s.translation)
@@ -278,7 +279,9 @@ async function chooseTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs[0];
   if (!keyFromUrl(tab?.url))
-    throw new Error('请先打开 YouTube 或 Bilibili 视频播放页，再点击读取视频。');
+    throw new Error(
+      '请先打开 YouTube、Bilibili 或咪咕赛事播放页，再点击读取视频；咪咕请先点击工具栏上的 CueMind 图标。',
+    );
   return tab;
 }
 async function leaveVideo() {
@@ -354,7 +357,7 @@ async function load(refresh = false, trackId) {
     });
     if (gen !== generation) return;
     record = data.record;
-    mode = 'original';
+    mode = record.videoInfo.platform === 'migu' ? 'bilingual' : 'original';
     limit = 70;
     renderTracks(data.tracks);
     const captured = await rpc('CAPTURE_STATUS');
@@ -478,9 +481,11 @@ function render() {
             ? '导入字幕'
             : record.transcriptMeta.source === 'supadata_native'
               ? `Supadata 字幕 · ${record.transcriptMeta.language || '原文'}`
-              : `${record.transcriptMeta.isAi ? '平台自动字幕' : '平台人工字幕'}${record.transcriptMeta.language ? ' · ' + record.transcriptMeta.language : ''}`;
+              : record.transcriptMeta.source === 'migu_audio'
+                ? '咪咕音频 · 尚未生成字幕'
+                : `${record.transcriptMeta.isAi ? '平台自动字幕' : '平台人工字幕'}${record.transcriptMeta.language ? ' · ' + record.transcriptMeta.language : ''}`;
     $('#video-meta').textContent =
-      `${record.videoInfo.author || '视频'} · ${formatTime(record.videoInfo.duration)}${record.videoInfo.page > 1 ? ` · P${record.videoInfo.page}` : ''}`;
+      `${record.videoInfo.author || '视频'} · ${formatTime(record.videoInfo.duration)}${record.videoInfo.platform === 'bilibili' && record.videoInfo.page > 1 ? ` · P${record.videoInfo.page}` : ''}`;
   } else {
     $('#video-title').textContent = '把看过，变成学会。';
     $('#platform').textContent = 'YOUR VIDEO, UNDERSTOOD';
@@ -804,7 +809,7 @@ function transcriptText() {
 async function playRange(range, count = 1) {
   requireRecord();
   if (recording && captureInfo?.tabId === tabId)
-    throw new Error('请先停止录音转写，再跳转或复听。');
+    throw new Error('请先结束音频识别，再跳转或复听。');
   if (!range) throw new Error('请先选择一句字幕。');
   if (record.videoInfo.platform === 'demo') {
     time = range.start ?? range.ranges?.[0]?.start ?? 0;
@@ -2081,7 +2086,7 @@ $('#highlights').onclick = guard(async () => {
 });
 $('#smart').onclick = guard(async () => {
   requireRecord();
-  if (recording) throw new Error('请先完成录音');
+  if (recording) throw new Error('请先完成音频识别');
   if (!record.studyMap?.length) throw new Error('请先生成学习地图');
   smart = !smart;
   lastSmartRate = null;
@@ -2449,11 +2454,13 @@ function renderCapture() {
       ? '另一视频正在转写'
       : mine
         ? captureInfo?.stopping
-          ? '正在完成转写…'
-          : '结束录音并保存字幕'
+          ? '正在完成识别…'
+          : '结束音频采集并生成字幕'
         : asr && raw.length
-          ? '从当前进度继续录制'
-          : '开始录制并生成字幕';
+          ? '从当前进度继续识别'
+          : record?.videoInfo.platform === 'migu'
+            ? '识别当前 1 分钟音频'
+            : '识别当前视频音频';
   if (!recording) return;
   const completed = captureInfo?.completed;
   const progress = Number.isFinite(completed) ? ` · 已完成 ${completed} 批` : '';
@@ -2461,12 +2468,12 @@ function renderCapture() {
     el(
       'span',
       '',
-      `${mine ? '' : '另一视频：'}${captureInfo?.stopping ? '录音已结束，正在完成剩余转写' : '正在连续录制，每分钟自动生成字幕'}${progress}`,
+      `${mine ? '' : '另一视频：'}${captureInfo?.stopping ? '音频采集已结束，正在完成剩余识别' : '正在采集播放音频并识别字幕'}${progress}`,
     ),
   );
   if (!captureInfo?.stopping)
     bar.append(
-      button('结束录音', async () => {
+      button('结束音频采集', async () => {
         await rpc('CAPTURE_STOP');
         if (captureInfo) captureInfo.stopping = true;
         renderCapture();
@@ -2583,7 +2590,8 @@ if (ext) {
   chrome.tabs.onUpdated?.addListener((id, change) => {
     if (id !== tabId || !change.url) return;
     const nextKey = keyFromUrl(change.url);
-    if (nextKey && nextKey !== (record?.videoKey || loadingVideoKey)) load().catch(error);
+    if (nextKey && !matchesVideoUrl(record?.videoKey || loadingVideoKey, change.url))
+      load().catch(error);
   });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.settings) {
@@ -2710,10 +2718,10 @@ if (ext) {
           .catch(error);
         status(
           m.error
-            ? `录音结束，结果不完整：${m.error}`
+            ? `音频识别结束，结果不完整：${m.error}`
             : m.canceled
               ? '转写已取消，完成的字幕已保留。'
-              : '录音转写已完成。',
+              : '音频识别已完成。',
           !!m.error,
         );
       }

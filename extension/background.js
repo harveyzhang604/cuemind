@@ -21,7 +21,7 @@ import { cachedCompletion, cachedTranscribe } from './services/completion-cache.
 import * as db from './storage/db.js';
 import { validateSettings, restoreSettings } from './services/settings.js';
 import { validateBackup } from './core/backup.js';
-import { keyFromUrl } from './core/video.js';
+import { keyFromUrl, matchesVideoUrl } from './core/video.js';
 const tasks = new Map();
 let capture = null,
   restoring = false;
@@ -29,6 +29,8 @@ setInterval(() => {
   if (tasks.size || capture) chrome.runtime.getPlatformInfo().catch(() => {});
 }, 20000);
 chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+// Opening the workspace is independent of whether the current video is supported.
+// Keep the action handler so a toolbar click also grants temporary activeTab access.
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
 // Updating an unpacked extension invalidates scripts in tabs that remain open.
 // Reattach only the player bridge; do not reload pages, start AI, or change data.
@@ -49,13 +51,8 @@ chrome.runtime.onInstalled?.addListener(() => {
 });
 async function panelForTab(tab) {
   if (!Number.isInteger(tab?.id)) return;
-  const enabled = !!keyFromUrl(tab.pendingUrl || tab.url);
-  if (!enabled && chrome.sidePanel.close)
-    await chrome.sidePanel
-      .close({ tabId: tab.id })
-      .catch(() => chrome.sidePanel.close({ windowId: tab.windowId }).catch(() => {}));
   await chrome.sidePanel
-    .setOptions({ tabId: tab.id, path: 'panel/index.html', enabled })
+    .setOptions({ tabId: tab.id, path: 'panel/index.html', enabled: true })
     .catch(() => {});
 }
 chrome.tabs.onUpdated?.addListener((id, change, tab) => {
@@ -68,12 +65,7 @@ chrome.tabs.onActivated?.addListener(async ({ tabId }) => {
   } catch {}
 });
 chrome.action.onClicked.addListener((tab) => {
-  if (tab.id && keyFromUrl(tab.url)) {
-    chrome.sidePanel
-      .setOptions({ tabId: tab.id, path: 'panel/index.html', enabled: true })
-      .catch(() => {});
-    chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
-  } else panelForTab(tab).catch(() => {});
+  if (Number.isInteger(tab?.id)) chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
 });
 const notify = (data) => chrome.runtime.sendMessage({ ...data, type: 'EVENT' }).catch(() => {});
 async function settings() {
@@ -82,6 +74,14 @@ async function settings() {
     ...(await chrome.storage.local.get('settings')).settings,
   });
 }
+const translationSignature = (cfg) =>
+  JSON.stringify([
+    cfg.provider,
+    cfg.baseUrl,
+    cfg.models?.translation || cfg.model,
+    cfg.targetLanguage,
+    cfg.prompts?.translation || '',
+  ]);
 function assertAvailable(recordId, capability = 'exclusive') {
   if (
     restoring ||
@@ -110,9 +110,9 @@ async function remember(record) {
 async function page(tabId, trackId, expectedKey) {
   const tab = await chrome.tabs.get(tabId);
   const startingKey = keyFromUrl(tab.url);
-  if (!startingKey || (expectedKey && startingKey !== expectedKey))
+  if (!startingKey || (expectedKey && !matchesVideoUrl(expectedKey, tab.url)))
     throw new Error('视频已切换或不是支持的视频页，请重新读取。');
-  expectedKey = startingKey;
+  expectedKey ||= startingKey;
   const execute = async (signedPlayerUrl) => {
     const result = await chrome.scripting.executeScript({
       target: { tabId },
@@ -146,7 +146,10 @@ async function page(tabId, trackId, expectedKey) {
   }
   if (
     keyFromUrl((await chrome.tabs.get(tabId)).url) !== startingKey ||
-    videoKey(data.info) !== startingKey
+    !matchesVideoUrl(videoKey(data.info), tab.url) ||
+    (data.info.platform === 'migu' &&
+      expectedKey !== startingKey &&
+      videoKey(data.info) !== expectedKey)
   )
     throw new Error('视频已切换，已丢弃旧响应。');
   return data;
@@ -202,9 +205,11 @@ async function quickNote(tabId) {
   const taskId = crypto.randomUUID();
   try {
     const tab = await chrome.tabs.get(tabId),
-      videoKey = keyFromUrl(tab.url);
-    if (!videoKey) throw new Error('请打开视频');
-    const state = await player(tabId, { action: 'state', videoKey });
+      urlKey = keyFromUrl(tab.url);
+    if (!urlKey) throw new Error('请打开视频');
+    const state = await player(tabId, { action: 'state' });
+    const videoKey = state.videoKey || urlKey;
+    if (!matchesVideoUrl(videoKey, tab.url)) throw new Error('视频已切换，请重新读取');
     if (state.isAd) throw new Error('广告期间不能记笔记');
     if (restoring) throw new Error('正在恢复备份，请稍后记笔记');
     const selected = (await chrome.storage.local.get('lastRecord:' + videoKey))[
@@ -296,8 +301,10 @@ async function loadTranscript(m, signal) {
     useSupadata || (cfg.transcriptProvider === 'fallback' && (!m.trackId || m.trackId === 'auto'));
   const ensureVideo = async () => {
     if (signal.aborted) throw new DOMException('已取消', 'AbortError');
-    if (keyFromUrl((await chrome.tabs.get(m.tabId)).url) !== key)
+    if (!matchesVideoUrl(key, (await chrome.tabs.get(m.tabId)).url))
       throw new Error('视频已切换，已丢弃旧字幕。');
+    if (data.info.platform === 'migu' && videoKey((await page(m.tabId, null, key)).info) !== key)
+      throw new Error('咪咕节目已切换，已丢弃旧字幕。');
   };
   if (m.trackId === 'auto' || !m.trackId) {
     const name = 'lastRecord:' + key;
@@ -318,7 +325,11 @@ async function loadTranscript(m, signal) {
           (!data.info.audioLanguage || saved.transcriptMeta.language === data.info.audioLanguage)))
     ) {
       await ensureVideo();
-      saved.videoInfo = { ...saved.videoInfo, ...data.info };
+      saved.videoInfo = {
+        ...saved.videoInfo,
+        ...data.info,
+        duration: data.info.duration > 0 ? data.info.duration : saved.videoInfo.duration,
+      };
       await store(saved);
       return { record: saved, tracks: data.tracks, cached: true };
     }
@@ -371,8 +382,7 @@ async function loadTranscript(m, signal) {
     }
   }
   if (signal.aborted) throw new DOMException('已取消', 'AbortError');
-  if (keyFromUrl((await chrome.tabs.get(m.tabId)).url) !== key)
-    throw new Error('视频已切换，已丢弃旧字幕。');
+  await ensureVideo();
   if (!raw.length && !m.refresh) {
     const alternatives = (await db.all('videos'))
       .filter(
@@ -400,6 +410,8 @@ async function loadTranscript(m, signal) {
     },
     id,
   );
+  if (data.info.platform === 'migu')
+    selectFocusConfig(record, { overlay: true, overlayLanguage: 'bilingual' });
   await store(record);
   if (raw.length) await remember(record);
   return { record, tracks: data.tracks, needASR: !raw.length, warning: data.warning };
@@ -480,15 +492,8 @@ async function route(m) {
       )
         return result;
       const cfg = await settings();
-      const translationSignature = JSON.stringify([
-        cfg.provider,
-        cfg.baseUrl,
-        cfg.models?.translation || cfg.model,
-        cfg.targetLanguage,
-        cfg.prompts?.translation || '',
-      ]);
       const recovered = recoverEquivalentLearning(result.record, await db.all('videos'), {
-        translationSignature,
+        translationSignature: translationSignature(cfg),
       });
       if (recovered.translations || recovered.focus || recovered.cacheEntries)
         await store(result.record);
@@ -509,6 +514,8 @@ async function route(m) {
       language: 'unknown',
       trackId: `import-${crypto.randomUUID()}`,
     });
+    if (m.info.platform === 'migu')
+      selectFocusConfig(record, { overlay: true, overlayLanguage: 'bilingual' });
     return remember(await store(record));
   }
   if (m.type === 'GET_RECORD') return requireRecord(m.recordId);
@@ -799,18 +806,20 @@ async function route(m) {
         segments.map((x) => ({ ...x, start: x.start + offset, end: x.end + offset })),
         'whisper',
       );
-      return remember(
-        await store(
-          makeRecord(original.videoInfo, raw, {
-            source: 'whisper',
-            language: 'auto',
-            trackId: `asr-${crypto.randomUUID()}`,
-          }),
-        ),
-      );
+      const record = makeRecord(original.videoInfo, raw, {
+        source: 'whisper',
+        language: 'auto',
+        trackId: `asr-${crypto.randomUUID()}`,
+      });
+      if (original.videoInfo.platform === 'migu')
+        selectFocusConfig(
+          record,
+          original.focusConfig || { overlay: true, overlayLanguage: 'bilingual' },
+        );
+      return remember(await store(record));
     });
   if (m.type === 'CAPTURE_START') {
-    if (capture) throw new Error('已有录音正在进行');
+    if (capture) throw new Error('已有音频识别正在进行');
     assertAvailable(m.recordId);
     const session = { tabId: m.tabId, started: false };
     capture = session;
@@ -818,20 +827,59 @@ async function route(m) {
       const original = await requireRecord(m.recordId),
         cfg = await settings();
       if (!cfg.asrKey) throw new Error('请先在设置中配置 ASR Key');
-      const state = await player(m.tabId, { action: 'state', videoKey: original.videoKey });
-      if (state.isAd) throw new Error('正在播放广告，请等正片开始后再录音。');
+      let state = await player(m.tabId, { action: 'state', videoKey: original.videoKey });
+      if (state.isAd) throw new Error('正在播放广告，请等正片开始后再识别音频。');
       if (!Number.isFinite(state.duration) || state.time >= state.duration)
         throw new Error('请先将视频移动到要转写的位置');
+      session.preview = original.videoInfo.platform === 'migu';
+      if (
+        session.preview &&
+        original.transcriptMeta.source?.startsWith('whisper') &&
+        original.rawCaptions?.length
+      ) {
+        const first = Math.min(...original.rawCaptions.map((cue) => cue.start));
+        const last = Math.max(...original.rawCaptions.map((cue) => cue.end));
+        const completedThrough = Math.max(last, Number(original.transcriptMeta.capturedUntil) || 0);
+        if (state.time >= first - 1 && state.time < completedThrough - 0.25) {
+          if (completedThrough + 0.2 >= state.duration)
+            throw new Error('视频末尾已识别，请选择其他未识别的片段。');
+          await player(m.tabId, {
+            action: 'seek',
+            time: completedThrough + 0.2,
+            videoKey: original.videoKey,
+          });
+          const deadline = Date.now() + 8000;
+          do {
+            state = await player(m.tabId, { action: 'state', videoKey: original.videoKey });
+            if (
+              !state.seeking &&
+              (state.readyState == null || state.readyState >= 2) &&
+              Math.abs(state.time - (completedThrough + 0.2)) < 0.75
+            )
+              break;
+            if (Date.now() >= deadline) throw new Error('视频跳转后未准备好音频，请稍后重试。');
+            await new Promise((resolve) => setTimeout(resolve, 120));
+          } while (true);
+        }
+      }
       session.previousRate = state.rate;
       session.wasPaused = state.paused;
       session.videoKey = original.videoKey;
+      session.startTime = state.time;
+      session.translationSignature = translationSignature(cfg);
+      session.seedRecord =
+        session.preview &&
+        original.transcriptMeta.source?.startsWith('whisper') &&
+        original.rawCaptions?.length
+          ? original
+          : null;
       await player(m.tabId, { action: 'pause', videoKey: original.videoKey });
       await player(m.tabId, { action: 'capture-lock', locked: true, videoKey: original.videoKey });
       if (!(await chrome.offscreen.hasDocument()))
         await chrome.offscreen.createDocument({
           url: 'offscreen/index.html',
           reasons: ['USER_MEDIA'],
-          justification: '录制用户主动选择的视频标签页音频，分块生成带时间戳字幕',
+          justification: '采集用户主动选择的视频标签页音频，分块生成带时间戳字幕',
         });
       let streamId;
       try {
@@ -839,7 +887,7 @@ async function route(m) {
       } catch (e) {
         if (/not been invoked|activeTab/i.test(e.message))
           throw new Error(
-            '请在视频页面点击 Chrome 工具栏上的 CueMind 图标，再点击录音以授权当前标签页。',
+            '请在视频页面点击 Chrome 工具栏上的 CueMind 图标，再点击音频识别以授权当前标签页。',
           );
         throw e;
       }
@@ -848,6 +896,21 @@ async function route(m) {
         language: 'auto',
         trackId: `recording-${crypto.randomUUID()}`,
       });
+      if (session.preview) {
+        if (session.seedRecord) {
+          record.rawCaptions = structuredClone(original.rawCaptions);
+          record.sentences = structuredClone(original.sentences);
+          record.paragraphs = structuredClone(original.paragraphs);
+          record.transcriptMeta.capturedUntil = original.transcriptMeta.capturedUntil;
+          recoverEquivalentLearning(record, [original], {
+            translationSignature: session.translationSignature,
+          });
+        }
+        selectFocusConfig(
+          record,
+          original.focusConfig || { overlay: true, overlayLanguage: 'bilingual' },
+        );
+      }
       session.record = record;
       const reply = await chrome.runtime.sendMessage({
         target: 'offscreen',
@@ -856,7 +919,7 @@ async function route(m) {
         settings: cfg,
         recordId: record.id,
       });
-      if (!reply?.ok) throw new Error(reply?.error || '录音启动失败');
+      if (!reply?.ok) throw new Error(reply?.error || '音频识别启动失败');
       await store(record);
       await remember(record);
       await player(m.tabId, {
@@ -871,8 +934,12 @@ async function route(m) {
         type: 'RUN',
         recordId: record.id,
       });
-      if (!run?.ok) throw new Error(run?.error || '录音启动失败');
+      if (!run?.ok) throw new Error(run?.error || '音频识别启动失败');
       session.started = true;
+      if (session.preview)
+        session.timer = setTimeout(() => {
+          if (capture === session) stopCapture().catch(() => {});
+        }, 60000);
       return record;
     } catch (e) {
       await chrome.runtime
@@ -891,6 +958,7 @@ async function route(m) {
 }
 async function releaseCapture(s, restorePlaying = false) {
   if (!s?.videoKey) return;
+  clearTimeout(s.timer);
   await player(s.tabId, { action: 'capture-lock', locked: false, videoKey: s.videoKey }).catch(
     () => {},
   );
@@ -905,6 +973,7 @@ async function stopCapture(options = {}) {
   if (!s) return;
   if (s.stopping && !options.cancel) return;
   s.stopping = true;
+  clearTimeout(s.timer);
   try {
     const result = await chrome.runtime.sendMessage({
       target: 'offscreen',
@@ -953,7 +1022,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       sender.id !== chrome.runtime.id ||
       !sender.tab ||
       sender.frameId !== 0 ||
-      m.videoKey !== keyFromUrl(sender.tab.url) ||
+      !matchesVideoUrl(m.videoKey, sender.tab.url) ||
       !['expand', 'space', 'seek'].includes(m.action) ||
       (m.action === 'expand' && ![-1, 1].includes(m.direction))
     )
@@ -1012,6 +1081,10 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       r.rawCaptions = normalizeCaptions([...r.rawCaptions, ...extra], 'whisper');
       r.sentences = localSentences(r.rawCaptions);
       r.paragraphs = paragraphs(r.sentences);
+      if (capture.seedRecord)
+        recoverEquivalentLearning(r, [capture.seedRecord], {
+          translationSignature: capture.translationSignature,
+        });
       await store(r);
       if (capture?.record.id === r.id) capture.completed = m.completed;
       notify({ event: 'asr', recordId: r.id, record: r, completed: m.completed });
@@ -1030,6 +1103,19 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
         await store(s.record);
       }
       await releaseCapture(s);
+      if (s.preview && !m.error && !m.canceled) {
+        const finalState = await player(s.tabId, { action: 'state', videoKey: s.videoKey }).catch(
+          () => null,
+        );
+        if (finalState?.time >= s.startTime) {
+          s.record.transcriptMeta.capturedUntil = finalState.time;
+          await store(s.record);
+        }
+        await player(s.tabId, { action: 'pause', videoKey: s.videoKey }).catch(() => {});
+        await player(s.tabId, { action: 'seek', time: s.startTime, videoKey: s.videoKey }).catch(
+          () => {},
+        );
+      }
       if (capture === s) capture = null;
       notify({ event: 'asr-finished', recordId: m.recordId, error: m.error, canceled: m.canceled });
     })()

@@ -2,7 +2,7 @@
 
 **Understand a whole video, one sentence at a time.**
 
-CueMind is an open-source desktop Chrome extension for reading YouTube and Bilibili transcripts, learning with bilingual subtitles, replaying selected sentences, and keeping notes with their original sources. Use it for language practice, courses, interviews, and talks.
+CueMind is an open-source desktop Chrome extension for reading YouTube and Bilibili transcripts, learning with bilingual subtitles, replaying selected sentences, and keeping notes with their original sources. It can also transcribe the currently playing audio on Migu sports pages. Use it for language practice, courses, interviews, and talks.
 
 Bring your own model account and API key. Learning records stay on your device. There is no CueMind account, developer server, credit system, or telemetry.
 
@@ -32,7 +32,7 @@ Use **desktop Chrome 116 or later**. You do not need Node.js, Python, or a build
 5. Click **Load unpacked**.
 6. Select the project's **`extension/` folder**, usually `cuemind-main/extension/` after extracting the download. This folder contains `manifest.json`.
 7. Open Chrome's puzzle-piece menu and pin CueMind to the toolbar.
-8. Open a YouTube or Bilibili video, click the extension icon or the video's **CueMind** button, and click **读取当前视频** (Read current video).
+8. Open a YouTube or Bilibili video, click the extension icon or the video's **CueMind** button, and click **读取当前视频** (Read current video). On a Migu sports page, select a programme first, then click the CueMind toolbar icon.
 
 **Load `extension/`, not the repository root or the ZIP file.** To explore without a video or API key, choose **先体验示例** (Try the demo). The current interface is in Chinese; labels below include translations where useful.
 
@@ -66,6 +66,8 @@ I will enter keys myself in the extension settings; do not put them in code or G
 | Translate, explain, ask questions, generate an overview, analyze vocabulary, refine notes | Text model |
 | Use a fallback to retrieve existing YouTube captions | Supadata, optional |
 | Generate captions from audio when none are available | Speech transcription, optional |
+| Transcribe a Migu sports programme | Speech transcription |
+| Translate transcribed speech into Chinese | Text model |
 
 ### Text model: DeepSeek example
 
@@ -104,11 +106,17 @@ Its key is separate from the text-model key. CueMind requests existing captions 
 
 Configure Groq, OpenAI, or a timestamp-capable Whisper-compatible service in the speech section of settings. Groq keys are available from the [Groq console](https://console.groq.com/keys).
 
-Choose **⋯ → 导入字幕与音频** (Import subtitles and audio) to import SRT/VTT, upload audio, or record the current tab's audio. Transcription starts only when you request it. Recording asks for Chrome's audio-sharing permission. Audio is sent to your selected service, which may charge for transcription.
+Choose **⋯ → 导入字幕与音频** (Import subtitles and audio) to import SRT/VTT, upload an audio file, or choose **识别当前视频音频** (Transcribe current video audio). CueMind captures only the playing audio, not video frames, and sends it to your selected transcription service. Playback runs at 1× so the transcript aligns with video timestamps. Transcription starts only when you request it; provider charges may apply.
 
 Text models, Supadata, and transcription use separate settings and keys. A video with available platform captions usually does not need a speech service.
 
 </details>
+
+### Migu sports videos
+
+On a playable Migu sports programme, select the English audio programme, click the CueMind toolbar icon, then **读取当前视频 → 识别当前 1 分钟音频** (Read current video → Transcribe the current minute). The tested event page did not expose a readable subtitle track, so CueMind transcribes the playing audio with timestamps. With a text model configured, it adds Chinese translations and shows bilingual captions over the video. It returns to the segment start for review. Continuing from an already transcribed position skips to the end of the saved audio. Captions and matching translations are stored locally per programme.
+
+The player must be able to play audio, and transcription takes about as long as the segment plays. If Migu blocks playback because of copyright or region restrictions, CueMind cannot obtain that audio. You can import an audio or subtitle file you already have instead.
 
 ## Features
 

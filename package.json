@@ -1,6 +1,6 @@
 {
   "name": "cuemind",
-  "version": "1.0.29",
+  "version": "1.0.30",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,7 +16,7 @@
     "prettier": "3.6.2"
   },
   "license": "MIT",
-  "description": "Local-first video reading, bilingual subtitles, replay and notes for YouTube and Bilibili.",
+  "description": "Local-first video reading, bilingual subtitles, replay and notes for YouTube, Bilibili and Migu.",
   "engines": {
     "node": ">=22"
   }

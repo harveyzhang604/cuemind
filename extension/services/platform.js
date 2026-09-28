@@ -12,12 +12,47 @@ export async function inspectPage(trackId, expectedKey, signedPlayerUrl) {
     if (!r.ok) throw new Error(`平台请求失败 HTTP ${r.status}`);
     return r.json();
   };
+  const migu = ['www.miguvideo.com', 'miguvideo.com'].includes(location.hostname);
+  const programmeId = () =>
+    document.querySelector('[current-content-id]')?.getAttribute('current-content-id');
+  const eventId = new URL(location.href).pathname.match(/^\/p\/live\/(\d+)\/?$/)?.[1];
   const keyNow = () =>
-    location.hostname.includes('youtube')
-      ? `youtube:${new URL(location.href).searchParams.get('v')}:1`
-      : `bilibili:${location.pathname.match(/BV[\w]+/)?.[0]}:${new URL(location.href).searchParams.get('p') || 1}`;
-  if (expectedKey && keyNow() !== expectedKey) throw new Error('视频已切换，请重新加载。');
+    migu
+      ? `migu:${eventId}:${programmeId()}`
+      : location.hostname.includes('youtube')
+        ? `youtube:${new URL(location.href).searchParams.get('v')}:1`
+        : `bilibili:${location.pathname.match(/BV[\w]+/)?.[0]}:${new URL(location.href).searchParams.get('p') || 1}`;
+  if (expectedKey && keyNow() !== expectedKey && !(migu && expectedKey === `migu:${eventId}:1`))
+    throw new Error('视频已切换，请重新加载。');
   const video = document.querySelector('video');
+  if (migu) {
+    const programme = programmeId();
+    if (!eventId || !/^\d+$/.test(programme || '') || !video)
+      throw new Error('咪咕播放器正在加载，请开始播放后重新读取。');
+    const selected = document.querySelector(
+      `.match-review__slide.is-active[data-program-id="${programme}"]`,
+    );
+    const label = selected?.textContent?.trim() || '';
+    const info = {
+      platform: 'migu',
+      videoId: eventId,
+      page: Number(programme),
+      title: document.title.replace(/-咪咕视频$/, '') + (label ? ` · ${label}` : ''),
+      author: '咪咕视频',
+      description: '',
+      duration: Number.isFinite(video.duration) ? video.duration : 0,
+      audioLanguage: label.includes('英文') ? 'en' : '',
+      url: `https://${location.hostname}/p/live/${eventId}`,
+    };
+    return {
+      info,
+      tracks: [],
+      raw: [],
+      source: 'migu_audio',
+      warning:
+        '咪咕未提供可读取的字幕。点击「识别当前 1 分钟音频」，从正在播放的音频生成原文并自动补译；已有结果会从本机恢复。',
+    };
+  }
   const sameLanguage = (a, b) =>
     !!a &&
     !!b &&

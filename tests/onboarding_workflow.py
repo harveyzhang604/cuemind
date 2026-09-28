@@ -14,12 +14,12 @@ with preview_server() as base,sync_playwright() as p:
  page.locator('.transcript-more>summary').click();page.locator('#open-import').click();page.locator('#show-asr').click();page.locator('#configure-asr').click();assert page.evaluate('opened.at(-1)')=='panel/settings.html#speech-service'
  page.locator('#record').click();expect(page.locator('#setup-needed')).to_be_visible();assert not page.evaluate('calls.some(m=>m.type==="CAPTURE_START")');page.locator('#setup-needed-close').click()
  page.evaluate("settingsChanged({settings:{newValue:{asrKey:'FIXTURE'}}},'local')")
- page.locator('#record').click();expect(page.locator('#capture-controls')).to_contain_text('正在连续录制')
+ page.locator('#record').click();expect(page.locator('#capture-controls')).to_contain_text('正在采集播放音频并识别字幕')
  page.evaluate("fixture.rawCaptions=[{id:'r1',start:10,end:70,text:'Captured sentence.'}];fixture.sentences=[{id:'s1',start:10,end:70,rawText:'Captured sentence.',sourceIds:['r1']}];listeners.forEach(f=>f({type:'EVENT',event:'asr',recordId:'capture',record:fixture,completed:1}))")
  expect(page.locator('#capture-summary')).to_contain_text('00:10–01:10');expect(page.locator('#capture-controls')).to_contain_text('已完成 1 批');expect(page.locator('#asr-box')).to_be_visible();page.locator('#asr-box').scroll_into_view_if_needed();page.screenshot(path=str(ROOT/'docs/screenshots/first-use-capture-20260927.png'))
- page.locator('#record').click();expect(page.locator('#record')).to_be_disabled();expect(page.locator('#capture-controls')).to_contain_text('正在完成剩余转写')
+ page.locator('#record').click();expect(page.locator('#record')).to_be_disabled();expect(page.locator('#capture-controls')).to_contain_text('正在完成剩余识别')
  page.evaluate("listeners.forEach(f=>f({type:'EVENT',event:'asr-finished',recordId:'capture'}))")
- expect(page.locator('#record')).to_have_text('从当前进度继续录制');expect(page.locator('#record')).to_be_enabled();expect(page.locator('#capture-summary')).to_contain_text('00:10–01:10')
+ expect(page.locator('#record')).to_have_text('从当前进度继续识别');expect(page.locator('#record')).to_be_enabled();expect(page.locator('#capture-summary')).to_contain_text('00:10–01:10')
  assert not errors,errors
  settings=b.new_page();settings.goto(base+'/extension/panel/settings.html');expect(settings.locator('#asr-provider')).to_have_value('openai');settings.locator('#asrKey').fill('OLD-FIXTURE');settings.locator('#asr-provider').select_option('groq');expect(settings.locator('#asrUrl')).to_have_value('https://api.groq.com/openai/v1');expect(settings.locator('#asrModel')).to_have_value('whisper-large-v3-turbo');expect(settings.locator('#asrKey')).to_have_value('');settings.locator('#asrUrl').fill('https://custom.example/v1');expect(settings.locator('#asr-provider')).to_have_value('custom')
  for width in [320,430,900]:

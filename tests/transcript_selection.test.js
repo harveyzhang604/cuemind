@@ -49,3 +49,29 @@ test('Live caption requests cannot substitute auto captions or translated captio
  ]});
  assert.equal(new URL(requests[0]).searchParams.get('marker'),'manual');
 });
+
+
+test('Migu reads the actual programme, rejects stale programme IDs and makes no platform API requests', async () => {
+ const previous = {document:globalThis.document,location:globalThis.location,fetch:globalThis.fetch};
+ let programme = '967772705', requests = 0;
+ globalThis.location = {hostname:'miguvideo.com',href:'https://miguvideo.com/p/live/120000587094'};
+ globalThis.fetch = async () => {requests++; throw new Error('Unexpected platform request');};
+ globalThis.document = {
+  title:'Fixture-咪咕视频',
+  querySelector: selector => selector === 'video' ? {duration:11808} : selector === '[current-content-id]' ? {getAttribute:()=>programme} : {textContent:'【主赛】（英文原声）'},
+ };
+ try {
+  const data = await inspectPage(null,'migu:120000587094:1');
+  assert.equal(data.info.page,967772705);
+  assert.equal(data.info.audioLanguage,'en');
+  assert.equal(data.source,'migu_audio');
+  assert.equal(data.raw.length,0);
+  programme = '967768269';
+  await assert.rejects(inspectPage(null,'migu:120000587094:967772705'),/视频已切换/);
+  programme = '';
+  await assert.rejects(inspectPage(null,'migu:120000587094:1'),/正在加载/);
+  assert.equal(requests,0);
+ } finally {
+  for (const [key,value] of Object.entries(previous)) {if(value===undefined)delete globalThis[key];else globalThis[key]=value;}
+ }
+});

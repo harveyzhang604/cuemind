@@ -73,6 +73,13 @@
   };
   function key() {
     const u = new URL(location.href);
+    if (['www.miguvideo.com', 'miguvideo.com'].includes(u.hostname)) {
+      const id = u.pathname.match(/^\/p\/live\/(\d+)\/?$/)?.[1];
+      const programme = document
+        .querySelector('[current-content-id]')
+        ?.getAttribute('current-content-id');
+      return id && /^\d+$/.test(programme || '') ? `migu:${id}:${Number(programme)}` : null;
+    }
     const yt = u.hostname === 'www.youtube.com';
     const id = yt ? u.searchParams.get('v') : u.pathname.match(/BV\w+/)?.[0];
     return id
@@ -387,8 +394,8 @@
   }
   function attachFocus(v) {
     const container =
-      v.closest('#movie_player,.bpx-player-container') ||
-      document.querySelector('#movie_player,.bpx-player-container');
+      v.closest('#movie_player,.bpx-player-container,#mod-player') ||
+      document.querySelector('#movie_player,.bpx-player-container,#mod-player');
     const fullscreen = document.fullscreenElement;
     const target =
       fullscreen && fullscreen.contains(v) && fullscreen !== v ? fullscreen : container;
@@ -566,7 +573,7 @@
     focusHost.hidden = false;
     layoutFocus();
     if (!focusHost.hidden && !focusStyle) {
-      focusNativeTarget = v.closest('#movie_player,.bpx-player-container');
+      focusNativeTarget = v.closest('#movie_player,.bpx-player-container,#mod-player');
       focusNativeTarget?.setAttribute('data-cuemind-focus-active', '');
       focusStyle = document.createElement('style');
       focusStyle.dataset.cuemindFocusNative = '';
@@ -689,7 +696,8 @@
   function attachTools() {
     if (!alive()) return;
     const target =
-      document.fullscreenElement || document.querySelector('#movie_player,.bpx-player-container');
+      document.fullscreenElement ||
+      document.querySelector('#movie_player,.bpx-player-container,#mod-player');
     if (key() && target) {
       if (host.parentNode !== target) target.append(host);
     } else host.remove();
