@@ -57,7 +57,10 @@
     "docs/DEVELOPMENT.md",
     "docs/TROUBLESHOOTING.md",
     "docs/assets/demo.svg",
-    "docs/assets/mark.svg"
+    "docs/assets/mark.svg",
+    "docs/assets/readme-notes.png",
+    "docs/assets/readme-overview.png",
+    "docs/assets/readme-subtitles.png"
   ],
   "repository": [
     ".github/ISSUE_TEMPLATE/bug_report.yml",

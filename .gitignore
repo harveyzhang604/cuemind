@@ -51,6 +51,9 @@
 !/docs/TROUBLESHOOTING.md
 !/docs/assets/demo.svg
 !/docs/assets/mark.svg
+!/docs/assets/readme-notes.png
+!/docs/assets/readme-overview.png
+!/docs/assets/readme-subtitles.png
 !/extension/background.js
 !/extension/content/player.js
 !/extension/core/backup.js
