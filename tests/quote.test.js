@@ -1,0 +1,6 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {quoteTranslation} from '../extension/core/quote.js';
+import {runTask} from '../extension/services/tasks.js';
+test('quote translation only reuses exact full source with Chinese translation',()=>{const s=[{id:'a',rawText:'Think first. Then speak.',translation:'先思考，然后说。'}];assert.equal(quoteTranslation({sentenceId:'a',quote:'Think first.'},s),'');assert.equal(quoteTranslation({sentenceId:'a',quote:s[0].rawText},s),s[0].translation);assert.equal(quoteTranslation({translationZh:'思考。'},s),'思考。');});
+test('missing quote translations are persisted and reused without another request',async()=>{const original=global.fetch;let calls=0,saves=0;global.fetch=async()=>{calls++;return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({translations:[{id:'0',text:'先思考。'}]})}}]}));};try{const record={sentences:[],analysis:{quotes:[{sentenceId:'a',quote:'Think first.'}]}};const run=()=>runTask(record,'quoteTranslation',{apiKey:'test'},{},new AbortController().signal,async()=>saves++,()=>{});await run();await run();assert.equal(calls,1);assert.equal(saves,1);assert.equal(record.analysis.quotes[0].translationZh,'先思考。');}finally{global.fetch=original;}});

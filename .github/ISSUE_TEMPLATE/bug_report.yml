@@ -1,0 +1,30 @@
+name: Bug report / 问题反馈
+description: Report a reproducible functional problem using public or synthetic content.
+body:
+  - type: markdown
+    attributes:
+      value: '请勿提交 API Key、Cookie、完整学习备份或私人字幕。安全漏洞请按 SECURITY.md 私密报告。'
+  - type: input
+    id: version
+    attributes:
+      label: CueMind version / 插件版本
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and operating system / 浏览器与系统
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps, expected and actual behavior / 复现步骤、预期与实际表现
+      description: Use a public video URL or synthetic subtitles. Remove identifying URL parameters and credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted screenshot or error / 脱敏截图或错误
+      description: Crop browser tabs, bookmarks, account names and keys before attaching.

@@ -1,0 +1,62 @@
+{
+  "manifest_version": 3,
+  "name": "CueMind · 视频精读与复听",
+  "version": "1.0.29",
+  "description": "YouTube 与 Bilibili 完整句字幕、精准复听、AI 学习地图、带原文依据的问答和本地笔记。",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "activeTab",
+    "scripting",
+    "offscreen",
+    "tabCapture"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://www.bilibili.com/*",
+    "https://api.bilibili.com/*",
+    "https://*.hdslb.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "打开 CueMind",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "128": "icons/128.png"
+  },
+  "side_panel": {
+    "default_path": "panel/index.html"
+  },
+  "options_page": "panel/settings.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://www.bilibili.com/*"
+      ],
+      "js": [
+        "content/player.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  }
+}

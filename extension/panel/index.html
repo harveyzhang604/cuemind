@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CueMind · 视频精读</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="video-head compact-video">
+        <div class="video-title-row">
+          <h1 id="video-title">打开视频，开始学习</h1>
+          <button id="settings" class="icon-btn" title="模型与偏好设置" aria-label="设置">
+            ⚙
+          </button>
+        </div>
+        <div class="meta"><span id="video-meta"></span></div>
+        <span id="platform" hidden></span>
+      </header>
+      <nav class="tabs" aria-label="学习功能">
+        <button class="active" data-tab="transcript">字幕</button
+        ><button data-tab="study">问答</button><button data-tab="overview">概览</button
+        ><button data-tab="notes">笔记 <span id="note-count"></span></button>
+      </nav>
+      <div id="status" class="status" role="status" hidden>
+        <span id="status-text"></span><button id="cancel" hidden>取消任务</button
+        ><button id="dismiss-status" aria-label="关闭提示">×</button>
+      </div>
+      <main>
+        <section id="transcript" class="view active">
+          <div class="toolbar transcript-toolbar">
+            <div class="transcript-display-controls">
+              <span class="transcript-mode-wrap"
+                ><select id="transcript-mode" aria-label="字幕显示方式" title="字幕显示方式">
+                  <option value="original">原文</option>
+                  <option value="bilingual">双语</option>
+                  <option value="translated">译文</option>
+                </select></span
+              >
+              <div class="focus-entry-group"><span class="focus-entry-label">重点：</span></div>
+            </div>
+            <div class="transcript-utility-controls">
+              <div id="transcript-actions" role="group" aria-label="常用字幕工具"></div>
+              <button
+                id="export"
+                class="transcript-quick-action"
+                title="导出字幕与学习资料"
+                aria-label="导出字幕与学习资料"
+              >
+                导出</button
+              ><button
+                id="refresh"
+                class="transcript-quick-action"
+                title="重新读取当前视频"
+                aria-label="重新读取当前视频"
+              >
+                读取</button
+              ><button
+                id="toggle-search"
+                class="text-btn compact-tool"
+                aria-label="搜索字幕"
+                title="搜索字幕 /"
+                aria-expanded="false"
+              >
+                ⌕
+              </button>
+              <details class="transcript-more">
+                <summary aria-label="更多字幕工具" title="更多字幕工具">⋯</summary>
+                <div class="transcript-menu">
+                  <button id="subtitle-settings" class="text-btn">字幕设置</button
+                  ><button
+                    id="open-replay"
+                    class="text-btn"
+                    aria-haspopup="dialog"
+                    aria-controls="replay-dialog"
+                  >
+                    复听地图</button
+                  ><button id="open-import" class="text-btn">导入字幕与音频</button>
+                </div>
+              </details>
+            </div>
+          </div>
+          <div id="translation-needed" class="translation-needed" hidden>
+            <span>当前字幕还没有完整译文。</span
+            ><button id="translate" class="text-btn">翻译当前字幕</button
+            ><small>点击后调用文本模型生成译文，可能产生 API 费用。</small>
+          </div>
+          <div
+            id="subtitle-navigation"
+            class="subtitle-navigation"
+            role="group"
+            aria-label="字幕快捷导航"
+            hidden
+          >
+            <button
+              id="first-subtitle"
+              class="locate-floating text-btn"
+              title="查看字幕开头，不改变视频播放位置"
+            >
+              ⇈ 字幕开头</button
+            ><button
+              id="locate"
+              class="locate-floating text-btn"
+              title="回到当前句并恢复跟随"
+              hidden
+            >
+              ◎ 当前句
+            </button>
+          </div>
+          <div class="search-row" id="transcript-search" hidden>
+            <span>⌕</span
+            ><input
+              id="search"
+              type="search"
+              maxlength="200"
+              placeholder="搜索字幕或译文…"
+              aria-label="搜索字幕"
+            /><span id="search-count" class="hint" aria-live="polite"></span
+            ><button id="search-prev" class="text-btn" aria-label="上一处匹配">↑</button
+            ><button id="search-next" class="text-btn" aria-label="下一处匹配">↓</button
+            ><button id="close-search" class="text-btn" aria-label="关闭搜索">×</button>
+          </div>
+          <span id="sentence-count" hidden></span>
+          <div id="sentences" class="sentences"></div>
+          <button id="more" class="text-btn transcript-more-page" hidden>重试加载更多字幕</button>
+          <div id="empty" class="empty">
+            <div class="empty-art"><i></i><i></i><i></i><b>▶</b></div>
+            <h2>从一句，听懂一整个视频。</h2>
+            <p>打开 YouTube 或 Bilibili 视频，<br />点击「读取视频」开始你的精读。</p>
+            <button id="start" class="primary">读取当前视频 <span>↗</span></button>
+            <div class="empty-links">
+              <button id="demo" class="text-btn">先体验示例</button
+              ><label class="text-btn file-label"
+                >导入 SRT / VTT<input id="import" type="file" accept=".srt,.vtt" hidden
+              /></label>
+            </div>
+            <p class="small">
+              无需配置即可读取平台字幕、复听和保存原文笔记。需要翻译或问答时再配置模型。
+            </p>
+          </div>
+          <div id="asr-box" class="notice" hidden>
+            <strong>无字幕？生成原文字幕</strong>
+            <p id="capture-summary" role="status"></p>
+            <p>从当前进度录制，每分钟自动生成一批字幕并继续。结束录音后保留已完成的字幕。</p>
+            <div class="row">
+              <button id="record" class="primary">录制当前视频并转写</button
+              ><label class="button file-label"
+                >导入音频转写<input id="audio" type="file" accept="audio/*,video/*" hidden
+              /></label>
+            </div>
+            <button id="configure-asr" class="text-btn">配置语音服务</button>
+            <details class="capture-details">
+              <summary>录制说明与导入位置</summary>
+              <p>
+                录音按 1×
+                实时播放；暂停或切换视频会结束录音，跳转或变速会丢弃当前音频块。再次录制建立独立记录，原字幕与笔记保留。
+              </p>
+              <label
+                >导入音频在视频中的起点（秒）<input
+                  id="audio-offset"
+                  type="number"
+                  min="0"
+                  value="0"
+              /></label>
+            </details>
+          </div>
+        </section>
+        <section id="study" class="view">
+          <section class="study-chat qa-home">
+            <div class="section-top">
+              <h2>问问这个视频</h2>
+              <button id="qa-new" class="text-btn">＋ 新问题</button>
+            </div>
+            <details id="qa-topics">
+              <summary>历史话题</summary>
+              <div id="qa-topic-list"></div>
+            </details>
+            <div id="qa-current" class="qa-current" hidden></div>
+            <div class="qa-scope-row">
+              <label for="qa-scope">基于</label
+              ><select id="qa-scope" aria-label="问答范围">
+                <option value="sentence">当前句</option>
+                <option value="segment">当前片段</option>
+                <option value="video">整个视频</option></select
+              ><select id="qa-language" aria-label="回答语言">
+                <option value="zh">中文回答</option>
+                <option value="en">English</option>
+                <option value="bilingual">中英双语</option></select
+              ><span id="chat-context" class="context-tag">跟随视频播放位置</span>
+            </div>
+            <div id="qa-shortcuts" class="qa-shortcuts">
+              <button type="button" data-qa-shortcut="这句话什么意思？">解释当前句</button
+              ><button type="button" data-qa-shortcut="这句话为什么这样表达？">为什么这样说</button
+              ><button type="button" data-qa-shortcut="这里有哪些重点词？">重点词</button>
+              <details id="qa-more-shortcuts">
+                <summary>更多</summary>
+                <button type="button" data-qa-shortcut="请用简单英语解释这句话。">
+                  简单英语解释</button
+                ><button
+                  type="button"
+                  data-qa-shortcut="根据字幕推测，这句话为什么可能听不出来？请说明你没有分析实际音频。"
+                >
+                  为什么听不出来
+                </button>
+              </details>
+            </div>
+            <button
+              id="qa-followup"
+              class="qa-followup"
+              title="点击结束追问，跟随当前播放"
+              hidden
+            ></button>
+            <div id="chat-history" class="chat-history" aria-live="polite"></div>
+            <form id="chat-form" class="composer">
+              <textarea
+                id="question"
+                rows="2"
+                placeholder="问问当前句、当前片段或整个视频…"
+                aria-label="向视频提问"
+                required
+              ></textarea>
+              <div class="row"><button class="primary" type="submit">提问 ↗</button></div>
+            </form>
+            <p id="qa-request-state" role="status" hidden></p>
+          </section>
+        </section>
+        <section id="overview" class="view">
+          <div class="section-top">
+            <h2>视频概览</h2>
+            <button id="analyze-overview" class="primary">✧ 生成概览</button>
+          </div>
+          <div id="overview-content" class="stack">
+            <div class="placeholder">
+              章节、金句与分段精讲会出现在这里。<br />所有时间点都来自原始字幕。
+            </div>
+          </div>
+        </section>
+
+        <section id="notes" class="view">
+          <div class="section-top">
+            <h2>我的笔记</h2>
+            <button id="new-note" class="primary">＋ 新笔记</button>
+          </div>
+          <div class="row">
+            <select id="note-scope" aria-label="笔记范围">
+              <option value="current">当前视频</option>
+              <option value="all">全部视频</option></select
+            ><input
+              id="note-search"
+              type="search"
+              placeholder="搜索内容、标题或作者"
+              aria-label="搜索笔记"
+            />
+          </div>
+          <div class="row note-display">
+            <div class="segments" aria-label="笔记显示模式">
+              <button data-note-mode="original" class="active">原文</button
+              ><button data-note-mode="bilingual">双语</button
+              ><button data-note-mode="translated">译文</button>
+            </div>
+            <button id="translate-notes" class="text-btn">翻译当前笔记</button
+            ><small class="hint">按需调用模型，译文保存在本机</small>
+          </div>
+          <div id="notes-list"></div>
+        </section>
+      </main>
+      <footer>
+        <div class="playback">
+          <div class="replay-controls">
+            <button id="previous" title="向前加一句；键盘双按 ←" aria-label="向前加一句">◀</button
+            ><button id="replay" class="play-main" title="复听所选句子 空格">↺ 复听 1 句</button
+            ><button id="next" title="向后加一句；键盘双按 →" aria-label="向后加一句">▶</button>
+          </div>
+          <div id="replay-range-hint" class="replay-range-hint" hidden></div>
+          <span class="divider" aria-hidden="true"></span
+          ><button id="loop" title="复听次数 Alt+R">听 1 次</button
+          ><button id="stop" title="结束复听 Esc" aria-label="结束复听" hidden>■</button>
+        </div>
+      </footer>
+      <div hidden aria-hidden="true">
+        <span id="play-time">00:00</span><span id="play-state">准备开始</span>
+      </div>
+    </div>
+    <dialog
+      id="replay-dialog"
+      class="replay-dialog"
+      aria-labelledby="replay-title"
+      aria-describedby="replay-hint"
+    >
+      <button id="close-replay" class="close" aria-label="关闭复听地图">×</button>
+      <h2 id="replay-title">重点复听</h2>
+      <p id="replay-hint" class="hint">选章节，移动到细条查看句子，再点击回听。</p>
+      <div class="qa-replay-tools">
+        <div class="study-tools">
+          <button id="highlights" class="button">▶ 只学重点</button
+          ><select id="study-mode" aria-label="复听字幕显示模式">
+            <option value="original">原文</option>
+            <option value="bilingual" selected>双语</option>
+            <option value="translated">译文</option>
+          </select>
+          <details class="replay-options">
+            <summary>更多</summary>
+            <div class="row">
+              <button id="smart" class="button">智能速度：关闭</button
+              ><button id="stop-smart" class="text-btn">停止</button
+              ><button id="analyze-study" class="text-btn">✧ 标记复听重点</button>
+            </div>
+          </details>
+        </div>
+        <div id="replay-status" role="status" hidden></div>
+        <div id="study-summary"></div>
+        <div class="legend"><span>● 重点复听</span><span>● 正常听</span><span>● 可略过</span></div>
+        <div id="study-timeline" class="timeline"></div>
+        <div id="study-list"></div>
+      </div>
+    </dialog>
+    <dialog id="export-dialog">
+      <form method="dialog"><button class="close" aria-label="关闭">×</button></form>
+      <h2>导出</h2>
+      <p class="hint">保存字幕，或把概览和笔记一起带走。</p>
+      <label class="check"
+        ><input id="include-transcript" type="checkbox" checked /> 学习稿包含双语字幕</label
+      >
+      <div class="export-grid">
+        <button data-export="md">Markdown 学习稿<small>章节 · 重点 · 金句 · 笔记</small></button
+        ><button data-export="mindmap">
+          Mermaid 思维导图<small>基于章节，无额外 AI 费用</small></button
+        ><button data-export="outline">层级大纲<small>Markdown / XMind 导入</small></button
+        ><button data-export="srt">SRT 字幕<small>带真实时间戳的完整句</small></button
+        ><button data-export="txt">纯文本 TXT<small>当前显示模式</small></button
+        ><button data-export="json">完整 JSON 备份<small>学习资料，不包含 API Key</small></button>
+      </div>
+    </dialog>
+    <dialog id="subtitle-settings-dialog" aria-labelledby="subtitle-settings-title">
+      <form method="dialog"><button class="close" aria-label="关闭字幕设置">×</button></form>
+      <h2 id="subtitle-settings-title">字幕设置</h2>
+      <p id="source" class="hint"></p>
+      <label class="subtitle-source-label"
+        >字幕来源<select id="tracks" aria-label="字幕语言轨道" hidden></select
+      ></label>
+      <p class="hint">选择使用哪份原始字幕。原文／双语／译文只改变显示方式。</p>
+      <button id="open-focus-settings" class="button">重点词、字号与视频字幕</button>
+    </dialog>
+    <dialog id="import-dialog" aria-labelledby="import-title">
+      <form method="dialog"><button class="close" aria-label="关闭导入">×</button></form>
+      <h2 id="import-title">导入字幕与音频</h2>
+      <p class="hint">导入内容建立独立记录，保留已有笔记。</p>
+      <button id="show-asr" class="button">录音或导入音频转写</button
+      ><button id="import-existing" class="button">导入 SRT / VTT 为独立学习记录</button
+      ><label class="button file-label"
+        >从备份恢复<input type="file" id="restore" accept=".json" hidden
+      /></label>
+    </dialog>
+    <dialog id="note-dialog">
+      <form id="note-form">
+        <button type="button" class="close" id="close-note" aria-label="关闭">×</button
+        ><span class="eyebrow">A THOUGHT WORTH KEEPING</span>
+        <h2>记下此刻的理解</h2>
+        <blockquote id="note-source"></blockquote>
+        <textarea id="note-body" rows="7" placeholder="用自己的话记下来…" required></textarea>
+        <div class="row">
+          <button id="refine-note" type="button" class="button">✧ AI 整理预览</button
+          ><button type="submit" class="primary">保存笔记</button>
+        </div>
+        <div id="refine-preview" hidden>
+          <p id="refine-text"></p>
+          <button id="replace-note" type="button">替换</button
+          ><button id="append-note" type="button">追加</button
+          ><button id="cancel-refine" type="button">取消</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="setup-needed" aria-labelledby="setup-needed-title">
+      <h2 id="setup-needed-title"></h2>
+      <p id="setup-needed-copy" class="hint"></p>
+      <div class="row">
+        <button id="setup-needed-configure" class="primary">去配置</button
+        ><button id="setup-needed-close" class="button">继续看字幕</button>
+      </div>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+    <script type="module" src="app.js"></script>
+    <dialog id="explain-dialog">
+      <button id="close-explain" class="close" aria-label="关闭解释">×</button>
+      <h2>词汇与上下文解释</h2>
+      <blockquote id="explain-selection"></blockquote>
+      <p id="explain-pronunciation" class="explain-pronunciation" hidden></p>
+      <p id="explain-meaning" class="explain-meaning" hidden></p>
+      <p id="explain-answer" lang="zh-CN"></p>
+      <p id="explain-answer-en" lang="en" hidden></p>
+      <button id="explain-ask" class="text-btn">进一步问 ↗</button>
+    </dialog>
+  </body>
+</html>

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>CueMind · 模型与偏好</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="settings-page">
+      <header class="masthead">
+        <a class="brand" href="index.html"
+          ><span class="logo">c<span>m</span></span
+          >CueMind</a
+        ><span class="eyebrow">YOUR MODELS. YOUR NOTES.</span>
+      </header>
+      <h1>让 AI 按你的方式工作。</h1>
+      <p class="hint">
+        密钥只保存在本机扩展中。使用 AI 时，所需字幕、问题或音频会直接发送给你选择的服务商。
+      </p>
+      <p class="hint">
+        更新时保留原安装目录，替换文件后重新加载扩展，已保存设置会保留；请勿先卸载旧扩展。
+      </p>
+      <section class="setup-guide">
+        <h2>先看字幕，需要时再配置</h2>
+        <p class="hint">
+          读取平台字幕、复听和保存原文笔记无需 API
+          Key。翻译与问答配置文本模型；无字幕时再配置语音转写。Supadata 是可选备用服务。
+        </p>
+        <div class="row">
+          <a class="button" href="#text-service">翻译与问答</a
+          ><a class="button" href="#speech-service">无字幕转写</a
+          ><a class="button" href="#subtitle-service">备用字幕</a>
+        </div>
+      </section>
+      <form id="settings-form">
+        <section class="card" id="text-service">
+          <h2>文本模型</h2>
+          <label
+            >服务商<select id="provider">
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="compatible">OpenAI Compatible / 本地 Ollama</option>
+            </select></label
+          ><label
+            >API 基础地址<input
+              id="baseUrl"
+              type="url"
+              required
+              placeholder="https://api.openai.com/v1"
+          /></label>
+          <div class="row">
+            <label>模型名称<input id="model" required placeholder="gpt-4o-mini" /></label
+            ><label
+              >目标语言<select id="targetLanguage" required aria-label="目标语言">
+                <option value="简体中文">简体中文</option>
+                <option value="繁体中文">繁体中文</option>
+                <option value="English">英语（English）</option>
+                <option value="日本語">日语（日本語）</option>
+                <option value="한국어">韩语（한국어）</option>
+                <option value="Français">法语（Français）</option>
+                <option value="Deutsch">德语（Deutsch）</option>
+                <option value="Español">西班牙语（Español）</option>
+                <option value="Português">葡萄牙语（Português）</option>
+                <option value="Русский">俄语（Русский）</option>
+                <option value="العربية">阿拉伯语（العربية）</option>
+                <option value="हिन्दी">印地语（हिन्दी）</option>
+                <option value="Tiếng Việt">越南语（Tiếng Việt）</option>
+                <option value="ไทย">泰语（ไทย）</option>
+                <option value="Italiano">意大利语（Italiano）</option>
+                <option value="Bahasa Indonesia">印度尼西亚语（Bahasa Indonesia）</option>
+              </select></label
+            >
+          </div>
+          <label
+            >API Key<input
+              id="apiKey"
+              aria-describedby="model-key-help"
+              type="password"
+              autocomplete="off"
+              placeholder="仅保存在 chrome.storage.local"
+          /></label>
+          <p id="model-key-help" class="hint key-help" aria-live="polite"></p>
+          <details>
+            <summary>高级模型参数</summary>
+            <div class="row">
+              <label
+                >超时（秒）<input id="timeout" type="number" min="5" max="180" value="90" /></label
+              ><label
+                >输出 Token 上限<input
+                  id="maxTokens"
+                  type="number"
+                  min="512"
+                  max="32768"
+                  value="6000"
+              /></label>
+            </div>
+            <p class="hint">任务串行运行，分块结果自动保存。以下模型留空时使用默认模型。</p>
+            <div id="capability-models"></div>
+          </details>
+        </section>
+        <section class="card" id="speech-service">
+          <h2>无字幕视频 · 语音转写</h2>
+          <p class="hint">
+            使用支持带时间戳 verbose_json 的 Whisper-compatible 接口。标签页录音按 1× 实时播放，每
+            60 秒自动处理一块并继续录制，无需反复点击。结束录音后会处理剩余音频；也可上传 24 MB
+            内的音频。
+          </p>
+          <label
+            >语音服务商<select id="asr-provider">
+              <option value="groq">Groq</option>
+              <option value="openai">OpenAI</option>
+              <option value="custom">自定义兼容服务</option>
+            </select></label
+          >
+          <p id="asr-preset-help" class="hint" role="status"></p>
+          <label
+            >ASR API 基础地址<input id="asrUrl" type="url" placeholder="https://api.openai.com/v1"
+          /></label>
+          <div class="row">
+            <label>ASR 模型<input id="asrModel" value="whisper-1" /></label
+            ><label
+              >ASR API Key<input
+                id="asrKey"
+                aria-describedby="asr-key-help"
+                type="password"
+                autocomplete="off"
+            /></label>
+          </div>
+          <p id="asr-key-help" class="hint key-help">
+            用于将音频转成带时间戳的字幕。<a
+              href="https://console.groq.com/keys"
+              target="_blank"
+              rel="noopener noreferrer"
+              >获取 Groq API Key ↗</a
+            >，或<a
+              href="https://platform.openai.com/api-keys"
+              target="_blank"
+              rel="noopener noreferrer"
+              >获取 OpenAI API Key ↗</a
+            >；请与上方 ASR 地址及模型匹配。
+          </p>
+        </section>
+        <section class="card" id="subtitle-service">
+          <h2>字幕服务</h2>
+          <p class="hint">
+            默认直接读取 YouTube / Bilibili 字幕，无需额外 Key。Supadata 是可选的 YouTube
+            字幕获取服务，与文本模型 Key 独立。
+          </p>
+          <label
+            >获取方式<select id="transcriptProvider">
+              <option value="platform">直接读取平台字幕（默认）</option>
+              <option value="fallback">平台读取失败时使用 Supadata</option>
+              <option value="supadata">优先使用 Supadata</option>
+            </select></label
+          ><label
+            >Supadata API Key<input
+              id="supadataApiKey"
+              aria-describedby="supadata-key-help"
+              type="password"
+              autocomplete="off"
+              placeholder="可选，仅保存在本机"
+          /></label>
+          <p id="supadata-key-help" class="hint key-help">
+            用于获取带时间戳的 YouTube 字幕。<a
+              href="https://dash.supadata.ai/auth/sign-up"
+              target="_blank"
+              rel="noopener noreferrer"
+              >创建 Supadata 账号并获取 API Key ↗</a
+            >。
+          </p>
+          <p class="hint">
+            使用时将视频链接和原文语言发送给 Supadata，只请求已有字幕（native），不自动生成 AI
+            字幕。服务可能计费；<a
+              href="https://docs.supadata.ai/get-transcript"
+              target="_blank"
+              rel="noopener noreferrer"
+              >官方说明</a
+            >。Bilibili 仍直接读取。
+          </p>
+        </section>
+        <section class="card">
+          <h2>听完整，再往下。</h2>
+          <div class="row">
+            <label
+              >句首缓冲（秒）<input
+                id="preBuffer"
+                type="number"
+                min="0"
+                max="0.25"
+                step="0.05"
+                value="0.15" /></label
+            ><label
+              >句尾缓冲（秒）<input
+                id="postBuffer"
+                type="number"
+                min="0"
+                max="0.25"
+                step="0.05"
+                value="0.15"
+            /></label>
+          </div>
+          <p class="hint">
+            快捷键：单按 ← / → 跳转 5 秒；双按向前 / 向后加一句（350
+            毫秒内）。空格复听所选范围，再按空格退出复听并继续播放；Esc 停止。
+          </p>
+        </section>
+        <section class="card">
+          <h2>提示词偏好</h2>
+          <p class="hint">
+            每项功能都有默认处理方式，留空即可使用。只需用日常语言填写偏好，或选择示例后替换、追加，再自由修改。程序自动处理字幕对应关系和返回格式；保存设置后用于后续
+            AI 请求，每项最多 6000 字。
+          </p>
+          <div id="prompts"></div>
+          <button id="reset-prompts" class="button" type="button">清空全部补充偏好</button>
+        </section>
+        <div class="row">
+          <button type="submit" class="primary">保存设置</button
+          ><span id="save-status" role="status"></span>
+        </div>
+      </form>
+      <section class="card">
+        <h2>本地数据</h2>
+        <p class="hint" id="data-counts">字幕、分析、问答与笔记保存在当前 Chrome 配置中。</p>
+        <div class="row">
+          <button class="button" type="button" data-manage="clear-cache">清除分析缓存</button
+          ><button class="button" type="button" data-manage="delete-notes">删除全部笔记</button
+          ><button class="button" type="button" data-manage="reset">重置扩展数据</button>
+        </div>
+        <button class="button" id="storage-usage" type="button">查看本地空间</button>
+        <p class="hint" id="storage-usage-result" role="status">
+          学习结果保存在本机，不会自动过期删除。需要释放空间时，请先导出备份，再清除分析缓存。
+        </p>
+        <p class="hint" id="data-status" role="status"></p>
+      </section>
+      <dialog id="data-confirm">
+        <h2 id="data-title"></h2>
+        <p id="data-description"></p>
+        <p class="hint">此操作不可撤销。需要保留资料时，请先在侧栏「导出」中保存完整 JSON 备份。</p>
+        <div class="row">
+          <button id="data-cancel" class="button">取消</button
+          ><button id="data-proceed" class="primary">确认操作</button>
+        </div>
+      </dialog>
+      <p class="hint">
+        没有开发者服务器，没有遥测。密钥不会随 JSON
+        备份导出。自定义服务地址只在保存时请求该域名的访问权限。
+      </p>
+    </div>
+    <script type="module" src="settings.js"></script>
+  </body>
+</html>
