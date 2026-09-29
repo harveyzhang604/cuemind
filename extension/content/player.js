@@ -926,7 +926,12 @@
     const value = JSON.stringify(state);
     if (value !== lastSnapshot || captureLocked || playbackEvent) {
       lastSnapshot = value;
-      send({ type: 'PLAYER_TICK', ...state, ...(playbackEvent ? { playbackEvent } : {}) });
+      send({
+        type: 'PLAYER_TICK',
+        ...state,
+        sampleAt: Date.now(),
+        ...(playbackEvent ? { playbackEvent } : {}),
+      });
     }
   }
   // Media events do not bubble. Capture them so quick pauses/resumes and a

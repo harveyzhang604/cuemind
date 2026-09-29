@@ -59,6 +59,8 @@ export function validateSettings(input = {}) {
   }
   result.baseUrl = endpoint(result.baseUrl);
   result.asrUrl = endpoint(result.asrUrl);
+  result.domesticAsrUrl = endpoint(result.domesticAsrUrl);
+  if (!['shared', 'platform'].includes(result.asrRouting)) throw new Error('语音服务分流设置无效');
   for (const [key, min, max] of [
     ['timeout', 5000, 180000],
     ['maxTokens', 512, 32768],
@@ -69,6 +71,8 @@ export function validateSettings(input = {}) {
   }
   if (!result.model || !result.asrModel || !result.targetLanguage)
     throw new Error('请填写模型名称和目标语言');
+  if (result.asrRouting === 'platform' && !result.domesticAsrModel)
+    throw new Error('请填写国内 ASR 的模型或资源 ID');
   return result;
 }
 
@@ -78,6 +82,7 @@ export function restoreSettings(backup, current) {
     ...backup,
     apiKey: '',
     asrKey: '',
+    domesticAsrKey: '',
     supadataApiKey: current.supadataApiKey || '',
     transcriptProvider: current.supadataApiKey
       ? (backup.transcriptProvider ?? current.transcriptProvider ?? 'platform')
@@ -86,5 +91,7 @@ export function restoreSettings(backup, current) {
   if (next.baseUrl === endpoint(current.baseUrl) && next.provider === current.provider)
     next.apiKey = current.apiKey;
   if (next.asrUrl === endpoint(current.asrUrl)) next.asrKey = current.asrKey;
+  if (next.domesticAsrUrl === endpoint(current.domesticAsrUrl || defaults.domesticAsrUrl))
+    next.domesticAsrKey = current.domesticAsrKey || '';
   return next;
 }

@@ -1,5 +1,33 @@
-export const FIRST_ASR_SECONDS = 20;
+export const FIRST_ASR_SECONDS = 10;
 export const NEXT_ASR_SECONDS = 60;
+
+// Compare timestamps sampled in the video tab, not when the service worker
+// happens to receive them. A delayed message must not look like a video jump.
+export function captureClockProblem(session, tick, receivedAt = Date.now()) {
+  const clock = Number.isFinite(tick.sampleAt) ? tick.sampleAt : receivedAt;
+  if (Number.isFinite(session.startedAt) && clock < session.startedAt)
+    return { stale: true, reason: '' };
+  if (session.lastTick && clock <= session.lastTick.clock) return { stale: true, reason: '' };
+  session.lastTick = { time: tick.time, clock };
+  if (!Number.isFinite(tick.time)) return { stale: false, reason: '播放器时间不可用' };
+  if (!session.mediaAnchor) session.mediaAnchor = { time: tick.time, clock };
+  if (tick.readyState < 2) {
+    session.bufferSince ??= clock;
+    if (clock - session.bufferSince >= 3000)
+      return { stale: false, reason: '视频持续缓冲超过 3 秒' };
+  } else {
+    session.bufferSince = null;
+  }
+  const expected = session.mediaAnchor.time + (clock - session.mediaAnchor.clock) / 1000;
+  if (Math.abs(tick.time - expected) > 2.5) {
+    session.driftSince ??= clock;
+    if (clock - session.driftSince >= 1500)
+      return { stale: false, reason: '播放时间与录音持续不同步' };
+  } else {
+    session.driftSince = null;
+  }
+  return { stale: false, reason: '' };
+}
 
 // Only plan audio after the current playhead. Nothing before it is requested
 // from the speech service unless the user deliberately seeks back there.

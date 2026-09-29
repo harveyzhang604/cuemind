@@ -22,7 +22,8 @@ import * as db from './storage/db.js';
 import { validateSettings, restoreSettings } from './services/settings.js';
 import { validateBackup } from './core/backup.js';
 import { keyFromUrl, matchesVideoUrl } from './core/video.js';
-import { planAsrSegments, skipRecognizedAudio } from './core/asr-progress.js';
+import { captureClockProblem, planAsrSegments, skipRecognizedAudio } from './core/asr-progress.js';
+import { checkSpeechNetwork, speechSettings } from './services/speech.js';
 const tasks = new Map();
 let capture = null,
   restoring = false;
@@ -755,6 +756,7 @@ async function route(m) {
     const s = await settings();
     delete s.apiKey;
     delete s.asrKey;
+    delete s.domesticAsrKey;
     delete s.supadataApiKey;
     return {
       format: 'cuemind',
@@ -802,7 +804,8 @@ async function route(m) {
       const offset = Number(m.offset ?? 0);
       if (!Number.isFinite(offset) || offset < 0) throw new Error('音频起点无效');
       const blob = await (await fetch(m.dataUrl)).blob();
-      const segments = await cachedTranscribe(blob, await settings(), signal, m.filename);
+      const cfg = speechSettings(await settings(), original.videoInfo.platform);
+      const segments = await cachedTranscribe(blob, cfg, signal, m.filename);
       const raw = normalizeCaptions(
         segments.map((x) => ({ ...x, start: x.start + offset, end: x.end + offset })),
         'whisper',
@@ -822,12 +825,18 @@ async function route(m) {
   if (m.type === 'CAPTURE_START') {
     if (capture) throw new Error('已有音频识别正在进行');
     assertAvailable(m.recordId);
-    const session = { id: crypto.randomUUID(), tabId: m.tabId, started: false };
+    const session = {
+      id: crypto.randomUUID(),
+      tabId: m.tabId,
+      started: false,
+      preflightController: new AbortController(),
+    };
     capture = session;
     try {
       const original = await requireRecord(m.recordId),
-        cfg = await settings();
+        cfg = speechSettings(await settings(), original.videoInfo.platform);
       if (!cfg.asrKey) throw new Error('请先在设置中配置 ASR Key');
+      await checkSpeechNetwork(cfg, session.preflightController.signal);
       let state = await player(m.tabId, { action: 'state', videoKey: original.videoKey });
       if (state.isAd) throw new Error('正在播放广告，请等正片开始后再识别音频。');
       if (!Number.isFinite(state.duration) || state.time >= state.duration)
@@ -960,6 +969,7 @@ async function route(m) {
         recordId: record.id,
       });
       if (!run?.ok) throw new Error(run?.error || '音频识别启动失败');
+      session.startedAt = Date.now();
       session.started = true;
       return record;
     } catch (e) {
@@ -992,6 +1002,7 @@ async function releaseCapture(s, restorePlaying = false) {
 async function stopCapture(options = {}) {
   const s = capture;
   if (!s) return;
+  if (!s.record) s.preflightController?.abort();
   if (s.stopping && !options.cancel) return;
   s.stopping = true;
   if (options.cancel) s.translationController?.abort();
@@ -1155,10 +1166,8 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     notify({ ...m, event: m.type, tabId: sender.tab.id });
     const s = capture;
     if (s?.started && s.tabId === sender.tab.id && !s.stopping) {
-      const now = Date.now();
-      const drift = s.lastTick
-        ? Math.abs(m.time - s.lastTick.time - (now - s.lastTick.clock) / 1000)
-        : 0;
+      const clock = m.type === 'PLAYER_TICK' ? captureClockProblem(s, m) : null;
+      if (clock?.stale) return;
       const interruption =
         m.type === 'PAGE_CHANGED' || m.videoKey !== s.videoKey
           ? '视频已切换'
@@ -1170,18 +1179,13 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
                 ? '播放速度发生变化'
                 : m.paused
                   ? ''
-                  : m.readyState < 2
-                    ? '视频正在缓冲'
-                    : drift > 0.8
-                      ? '播放时间与录音不同步'
-                      : '';
+                  : clock?.reason || '';
       if (interruption)
         stopCapture({
           discard: true,
           reason: `${interruption}，已结束本次录音；此前完成的字幕已保留。`,
         });
       else if (m.paused) stopCapture();
-      s.lastTick = { time: m.time, clock: now };
     }
     return;
   }
@@ -1210,6 +1214,9 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
           segment.recognizingAt = Date.now();
           if (Number.isFinite(m.timeoutMs)) segment.timeoutMs = m.timeoutMs;
         }
+        if (Number.isFinite(m.audioBytes) && m.audioBytes >= 0) segment.audioBytes = m.audioBytes;
+        if (Number.isFinite(m.audioLevel) && m.audioLevel >= 0)
+          segment.audioLevel = Math.min(1, m.audioLevel);
         if (Number.isFinite(m.start) && m.start >= 0) segment.start = m.start;
         if (Number.isFinite(m.end) && m.end > segment.start) segment.end = m.end;
         if (m.status === 'failed') segment.error = String(m.error || '识别失败').slice(0, 240);

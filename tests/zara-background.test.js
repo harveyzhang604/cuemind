@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
+import {speechSettings} from '../extension/services/speech.js';
 import {defaults} from '../extension/services/ai-provider.js';
 import {validateSettings} from '../extension/services/settings.js';
 import {normalizeCaptions,splitTimedCaptions,videoKey,SCHEMA_VERSION} from '../extension/core/transcript.js';
 import {localSentences,paragraphs} from '../extension/core/sentence.js';
 import {keyFromUrl,matchesVideoUrl} from '../extension/core/video.js';
-import {planAsrSegments,skipRecognizedAudio} from '../extension/core/asr-progress.js';
+import {captureClockProblem,planAsrSegments,skipRecognizedAudio} from '../extension/core/asr-progress.js';
 import {canReuseTranscript} from '../extension/services/platform.js';
 import {taskConflict} from '../extension/core/task-lock.js';
 import {clearLearningCache,dataActions} from '../extension/core/local-data.js';
@@ -17,7 +18,7 @@ import {explanationCacheKey} from '../extension/services/explanation-cache.js';
 async function fixture(existingStorage){
  const noop=()=>{},listeners=[],stores={videos:new Map(),notes:new Map(),chats:new Map()},storage=existingStorage||{settings:{...defaults,transcriptProvider:'supadata',supadataApiKey:'fixture'}};
  const inspection={info:{platform:'youtube',videoId:'sHieyY4r0-k',page:1,title:'Fixture',audioLanguage:'en',url:'https://www.youtube.com/watch?v=sHieyY4r0-k'},tracks:[]};
- const context={console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,splitTimedCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,inspection,
+ const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,splitTimedCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,inspection,
  db:{get:async(name,id)=>structuredClone(stores[name].get(id)),all:async name=>structuredClone([...stores[name].values()]),put:async(name,value)=>{stores[name].set(value.id,structuredClone(value));return value;},remove:async(name,id)=>stores[name].delete(id),updateNote:async(id,expected,change)=>{const n=stores.notes.get(id);if(n?.updatedAt!==expected)return null;const next={...n,...change};stores.notes.set(id,structuredClone(next));return next;},manage:async(action,transform)=>{if(action==='reset'){Object.values(stores).forEach(s=>s.clear());}else if(action==='delete-notes')stores.notes.clear();else{stores.chats.clear();for(const [id,r]of stores.videos)stores.videos.set(id,transform(r));}}},
  chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},tabs:{get:async()=>({url:inspection.info.url}),sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
  context.cachedCompletion=(...args)=>context.completion(...args.slice(0,5));
@@ -202,7 +203,7 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  const cfg = f.storage.settings;
  prior.tasks = {translation:{signature:JSON.stringify([cfg.provider,cfg.baseUrl,cfg.models?.translation||cfg.model,cfg.targetLanguage,cfg.prompts?.translation||'']),done:[0],failed:[]}};
  f.stores.videos.set(prior.id,prior);
- f.storage.settings = {...f.storage.settings,asrKey:'fixture-asr'};
+ f.storage.settings = {...f.storage.settings,asrRouting:'platform',asrKey:'fixture-overseas',domesticAsrKey:'fixture-domestic'};
  f.context.player = async (_tabId, command) => {
   if(command.action==='seek'){seeks.push(command.time);playback.time=command.time;}
   if(command.action==='play')playback.paused=false;
@@ -211,11 +212,14 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  };
  f.context.chrome.offscreen = {hasDocument:async()=>true};
  f.context.chrome.tabCapture = {getMediaStreamId:async()=>'fixture-stream'};
- f.context.chrome.runtime.sendMessage = async m => ({ok:true,data:m.type==='EVENT'?null:true});
+ let speechConfig;
+ f.context.chrome.runtime.sendMessage = async m => {if(m.type==='START')speechConfig=m.settings;return {ok:true,data:m.type==='EVENT'?null:true};};
  const next = await f.route({type:'CAPTURE_START',recordId:prior.id,tabId:1});
+ assert.equal(speechConfig.asrKey,'fixture-domestic');
+ assert.equal(speechConfig.asrModel,'volc.bigasr.auc_turbo');
  assert.ok(seeks[0]>=70&&seeks[0]<71,'the saved minute must not be recognized again');
  assert.equal(next.transcriptMeta.asrSegments[0].start,seeks[0]);
- assert.equal(next.transcriptMeta.asrSegments[0].end,seeks[0]+20);
+ assert.equal(next.transcriptMeta.asrSegments[0].end,seeks[0]+10);
  assert.equal(next.rawCaptions.length,1);
  assert.equal(next.sentences[0].translation,'第一回合。');
  const listener = f.listeners[0],sender={id:'fixture',url:'chrome-extension://fixture/offscreen/index.html'};
@@ -225,7 +229,7 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  });
  const firstSegment = next.transcriptMeta.asrSegments[0];
  await event({type:'ASR_PROGRESS',recordId:next.id,segmentId:firstSegment.id,status:'capturing'});
- await event({type:'ASR_CHUNK',recordId:next.id,segmentId:firstSegment.id,capturedEnd:90,segments:[{start:71,end:73,text:'Second round.'}],completed:1});
+ await event({type:'ASR_CHUNK',recordId:next.id,segmentId:firstSegment.id,capturedEnd:80,segments:[{start:71,end:73,text:'Second round.'}],completed:1});
  const saved = f.stores.videos.get(next.id);
  assert.equal(saved.rawCaptions.length,2);
  assert.equal(saved.sentences[0].translation,'第一回合。');
@@ -233,8 +237,21 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  assert.equal(saved.transcriptMeta.asrSegments[0].status,'source-ready');
  playback.time=130;
  await event({type:'ASR_FINISHED',recordId:next.id});
- assert.equal(f.stores.videos.get(next.id).transcriptMeta.capturedUntil,90);
+ assert.equal(f.stores.videos.get(next.id).transcriptMeta.capturedUntil,80);
  assert.equal(seeks.length,1,'continuous recognition does not rewind the player');
+});
+
+test('unreachable ASR stops before capturing audio or replacing saved captions', async()=>{
+ const f=await fixture();
+ f.inspection.info={platform:'migu',videoId:'120000587094',page:967772705,title:'Fixture',duration:300,url:'https://www.miguvideo.com/p/live/120000587094'};
+ const loaded=await f.route({type:'LOAD',tabId:1});
+ f.storage.settings={...f.storage.settings,asrRouting:'platform',domesticAsrKey:'fixture'};
+ let starts=0;
+ f.context.chrome.runtime.sendMessage=async m=>{if(m.type==='START')starts++;return {ok:true};};
+ f.context.checkSpeechNetwork=async()=>{throw new Error('Network unavailable');};
+ await assert.rejects(()=>f.route({type:'CAPTURE_START',recordId:loaded.record.id,tabId:1}),/Network unavailable/);
+ assert.equal(starts,0);assert.equal(f.stores.videos.size,1);
+ assert.equal(await f.route({type:'CAPTURE_STATUS'}),null);
 });
 
 test('rolling ASR saves each source segment, translates it, and keeps earlier bilingual lines', async () => {
@@ -258,7 +275,7 @@ test('rolling ASR saves each source segment, translates it, and keeps earlier bi
   return {record,errors:[]};
  };
  const started = await f.route({type:'CAPTURE_START',recordId:loaded.record.id,tabId:1});
- assert.deepEqual(Array.from(started.transcriptMeta.asrSegments.slice(0,2),s=>[s.start,s.end]),[[0,20],[20,80]]);
+ assert.deepEqual(Array.from(started.transcriptMeta.asrSegments.slice(0,2),s=>[s.start,s.end]),[[0,10],[10,70]]);
  const listener = f.listeners[0],sender={id:'fixture',url:'chrome-extension://fixture/offscreen/index.html'};
  const event = m => new Promise((resolve,reject)=>{
   const pending=listener(m,sender,reply=>reply?.ok?resolve(reply):reject(new Error(reply?.error||'missing reply')));
@@ -266,12 +283,14 @@ test('rolling ASR saves each source segment, translates it, and keeps earlier bi
  });
  const [first,second,third] = started.transcriptMeta.asrSegments;
  await event({type:'ASR_PROGRESS',recordId:started.id,segmentId:first.id,status:'capturing'});
- await event({type:'ASR_PROGRESS',recordId:started.id,segmentId:first.id,status:'recognizing'});
- await event({type:'ASR_CHUNK',recordId:started.id,segmentId:first.id,capturedEnd:20,segments:[{start:1,end:3,text:'Hello.'}],completed:1});
+ await event({type:'ASR_PROGRESS',recordId:started.id,segmentId:first.id,status:'recognizing',audioBytes:1500,audioLevel:.12});
+ assert.equal(f.stores.videos.get(started.id).transcriptMeta.asrSegments[0].audioBytes,1500);
+ assert.equal(f.stores.videos.get(started.id).transcriptMeta.asrSegments[0].audioLevel,.12);
+ await event({type:'ASR_CHUNK',recordId:started.id,segmentId:first.id,capturedEnd:10,segments:[{start:1,end:3,text:'Hello.'}],completed:1});
  await vm.runInContext('capture.translationQueue',f.context);
  assert.equal(f.stores.videos.get(started.id).sentences[0].translation,'中：Hello.');
  assert.equal(f.stores.videos.get(started.id).transcriptMeta.asrSegments[0].status,'done');
- await event({type:'ASR_CHUNK',recordId:started.id,segmentId:second.id,capturedEnd:60,segments:[{start:21,end:24,text:'How are you?'}],completed:2});
+ await event({type:'ASR_CHUNK',recordId:started.id,segmentId:second.id,capturedEnd:60,segments:[{start:11,end:14,text:'How are you?'}],completed:2});
  await vm.runInContext('capture.translationQueue',f.context);
  const saved = f.stores.videos.get(started.id);
  assert.deepEqual(Array.from(saved.sentences,s=>s.translation),['中：Hello.','中：How are you?']);
@@ -279,7 +298,7 @@ test('rolling ASR saves each source segment, translates it, and keeps earlier bi
  assert.equal(saved.transcriptMeta.asrSegments[1].end,60);
  assert.equal(saved.transcriptMeta.asrSegments[2].status,'interrupted');
  assert.equal(saved.transcriptMeta.asrSegments[2].start,60);
- assert.equal(saved.transcriptMeta.asrSegments[2].end,80);
+ assert.equal(saved.transcriptMeta.asrSegments[2].end,70);
  assert.deepEqual(calls.map(ids=>ids.length),[1,1],'previous bilingual lines must not be sent again');
  await event({type:'ASR_PROGRESS',recordId:started.id,segmentId:third.id,status:'failed',error:'ASR unavailable'});
  await event({type:'ASR_FINISHED',recordId:started.id,error:'ASR unavailable'});

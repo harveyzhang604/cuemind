@@ -12,6 +12,7 @@ import { parseSubtitle, formatTime, timestampUrl } from '../core/transcript.js';
 import { activeIndex, studyGroups } from '../core/sentence.js';
 import { markdown, mindmap, outline, subtitles } from '../core/export.js';
 import { demoRecord } from './demo.js';
+import { prepareSpeechAudio, speechSettings } from '../services/speech.js';
 import { keyFromUrl, matchesVideoUrl } from '../core/video.js';
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
@@ -2355,7 +2356,7 @@ $('#audio').onchange = guard(async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   if (!record) throw new Error('请先读取视频信息');
-  if (!settings.asrKey?.trim()) {
+  if (!speechSettings(settings, record.videoInfo.platform).asrKey?.trim()) {
     requestSetup('speech');
     e.target.value = '';
     return;
@@ -2370,12 +2371,16 @@ $('#audio').onchange = guard(async (e) => {
   $('#cancel').hidden = false;
   status('正在上传音频并转写…');
   try {
-    const dataUrl = await dataURL(file);
+    const audio = await prepareSpeechAudio(
+      file,
+      speechSettings(settings, record.videoInfo.platform),
+    );
+    const dataUrl = await dataURL(audio);
     if (gen !== generation) return;
     const result = await rpc('ASR_FILE', {
       recordId: id,
       dataUrl,
-      filename: file.name,
+      filename: audio === file ? file.name : 'audio.wav',
       offset: Number($('#audio-offset').value),
     });
     if (gen !== generation) return;
@@ -2403,7 +2408,7 @@ $('#record').onclick = guard(async () => {
     return;
   }
   if (!record) throw new Error('请先读取视频信息');
-  if (!settings.asrKey?.trim()) {
+  if (!speechSettings(settings, record?.videoInfo.platform).asrKey?.trim()) {
     requestSetup('speech');
     return;
   }
@@ -2413,6 +2418,7 @@ $('#record').onclick = guard(async () => {
     sourceTab = tabId;
   busy = true;
   try {
+    status('正在检查语音服务连接，通过后开始采集音频…');
     const result = await rpc('CAPTURE_START', { recordId: id, tabId: sourceTab });
     recording = true;
     captureInfo = { recordId: result.id, tabId: sourceTab, completed: 0 };
@@ -2447,12 +2453,18 @@ const asrLabels = {
 };
 function asrStatusText(segment) {
   const label = asrLabels[segment.status] || segment.status;
+  const audio =
+    ['queued', 'recognizing', 'failed', 'interrupted'].includes(segment.status) &&
+    Number.isFinite(segment.audioBytes)
+      ? ` · 音频 ${Math.max(1, Math.round(segment.audioBytes / 1024))} KB${Number.isFinite(segment.audioLevel) ? `，电平 ${Math.round(segment.audioLevel * 100)}%` : ''}`
+      : '';
   const start = segment.status === 'recognizing' ? segment.recognizingAt : segment.queuedAt;
-  if (!['recognizing', 'queued'].includes(segment.status) || !Number.isFinite(start)) return label;
+  if (!['recognizing', 'queued'].includes(segment.status) || !Number.isFinite(start))
+    return label + audio;
   const elapsed = Math.max(0, Math.floor((Date.now() - start) / 1000));
   return segment.status === 'recognizing' && segment.timeoutMs
-    ? `${label} · 已等待 ${elapsed}/${Math.ceil(segment.timeoutMs / 1000)} 秒`
-    : `${label} · 已等待 ${elapsed} 秒`;
+    ? `${label} · 已等待 ${elapsed}/${Math.ceil(segment.timeoutMs / 1000)} 秒${audio}`
+    : `${label} · 已等待 ${elapsed} 秒${audio}`;
 }
 function refreshAsrElapsed() {
   const all = record?.transcriptMeta.asrSegments || [];

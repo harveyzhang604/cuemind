@@ -1,4 +1,5 @@
 import { cachedTranscribe as transcribe } from '../services/completion-cache.js';
+import { prepareSpeechAudio } from '../services/speech.js';
 
 let state = null;
 const send = (message) => chrome.runtime.sendMessage(message);
@@ -31,7 +32,15 @@ async function prepare(m) {
     });
     if (s.stopping) throw new Error('录音启动已取消');
     s.audio = new AudioContext();
-    s.audio.createMediaStreamSource(s.stream).connect(s.audio.destination);
+    const source = s.audio.createMediaStreamSource(s.stream);
+    if (typeof s.audio.createAnalyser === 'function') {
+      s.analyser = s.audio.createAnalyser();
+      s.analyser.fftSize = 2048;
+      source.connect(s.analyser);
+      s.analyser.connect(s.audio.destination);
+    } else {
+      source.connect(s.audio.destination);
+    }
     await s.audio.resume();
     s.stream.getAudioTracks().forEach((track) =>
       track.addEventListener('ended', () => stop(s, { reason: '音频标签页已关闭' }), {
@@ -55,6 +64,15 @@ async function recordChunk(s) {
     const chunks = [];
     const offset = current.time;
     if (segment.end - offset < 1) return stop(s);
+    const samples = s.analyser ? new Uint8Array(s.analyser.fftSize) : null;
+    let audioLevel = 0;
+    const sampleAudio = () => {
+      if (!samples) return;
+      s.analyser.getByteTimeDomainData(samples);
+      let power = 0;
+      for (const value of samples) power += ((value - 128) / 128) ** 2;
+      audioLevel = Math.max(audioLevel, Math.sqrt(power / samples.length));
+    };
     const recorder = new MediaRecorder(s.stream, {
       mimeType: 'audio/webm;codecs=opus',
       audioBitsPerSecond: 64000,
@@ -74,6 +92,8 @@ async function recordChunk(s) {
     recorder.onerror = () => stop(s, { discard: true, reason: '音频录制失败' });
     recorder.onstop = () => {
       clearTimeout(s.timer);
+      clearInterval(s.meterTimer);
+      sampleAudio();
       const blob = new Blob(chunks, { type: 'audio/webm' }),
         discard = s.discardCurrent;
       const endPosition = position(s).catch(() => null);
@@ -85,6 +105,8 @@ async function recordChunk(s) {
               recordId: s.recordId,
               segmentId: segment.id,
               status: 'queued',
+              audioBytes: blob.size,
+              audioLevel,
             }).catch(() => {})
           : Promise.resolve();
         s.pending++;
@@ -108,8 +130,11 @@ async function recordChunk(s) {
               status: 'recognizing',
               end: capturedEnd,
               timeoutMs,
+              audioBytes: blob.size,
+              audioLevel,
             });
-            const result = await transcribe(blob, s.settings, s.controller.signal, undefined, {
+            const audio = await prepareSpeechAudio(blob, s.settings);
+            const result = await transcribe(audio, s.settings, s.controller.signal, undefined, {
               timeoutMs,
             });
             const reply = await send({
@@ -163,6 +188,7 @@ async function recordChunk(s) {
       else recordChunk(s);
     };
     recorder.start();
+    if (samples) s.meterTimer = setInterval(sampleAudio, 250);
     s.timer = setTimeout(
       () => {
         if (recorder.state !== 'inactive') recorder.stop();
@@ -186,6 +212,7 @@ async function finish(s) {
   if (s.finishing) return;
   s.finishing = true;
   clearTimeout(s.timer);
+  clearInterval(s.meterTimer);
   s.stream?.getTracks().forEach((t) => t.stop());
   await s.audio?.close().catch(() => {});
   await s.queue;

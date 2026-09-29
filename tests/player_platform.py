@@ -116,6 +116,7 @@ with sync_playwright() as p:
   page.wait_for_function('document.querySelector("video").paused && document.querySelector("video").currentTime >= 1.2',timeout=6000)
   assert page.locator('video').evaluate('(v)=>v.currentTime')<1.55
   # Real browser MediaRecorder / WebAudio, synthetic audio and mocked ASR only.
+  ctx.route('https://api.openai.com/v1/audio/transcriptions',lambda route:route.fulfill(status=405,body=''))
   recorder=ctx.new_page()
   recorder.add_init_script('''
     window.asrRequests=0;
@@ -126,6 +127,7 @@ with sync_playwright() as p:
     const originalFetch=window.fetch;
     window.fetch=async(url,options)=>{
       if(String(url).endsWith('/audio/transcriptions')){
+        window.fixtureAsrAudio=options.body.get('file');
         window.asrRequests++;return new Response(JSON.stringify({segments:[{start:0,end:.5,text:'Synthetic recording.'}]}));
       }return originalFetch(url,options);
     };
@@ -137,15 +139,21 @@ with sync_playwright() as p:
   page.wait_for_function('!document.querySelector("video").seeking')
   started=rpc('CAPTURE_START',recordId=record['id'],tabId=tid);assert started['ok'],started
   capture_id=started['data']['id'];assert rpc('CAPTURE_STATUS')['data']['recordId']==capture_id
+  panel.evaluate('(id)=>window.fixtureCaptureId=id',capture_id)
   assert not rpc('TASK',recordId=capture_id,capability='translation')['ok']
   assert not rpc('PLAYER_COMMAND',tabId=tid,command={'action':'seek','time':6})['ok']
   page.wait_for_timeout(1400)
   assert rpc('CAPTURE_STOP')['ok']
-  panel.wait_for_function('async()=>!(await chrome.runtime.sendMessage({type:"CAPTURE_STATUS"})).data',timeout=15000)
+  panel.wait_for_function('async()=>{const r=await chrome.runtime.sendMessage({type:"GET_RECORD",recordId:window.fixtureCaptureId});return r.ok&&r.data?.rawCaptions?.length===1}',timeout=15000)
+  panel.wait_for_function('async()=>{const r=await chrome.runtime.sendMessage({type:"CAPTURE_STATUS"});return r.ok&&r.data===null}',timeout=15000)
   captured=rpc('GET_RECORD',recordId=capture_id)['data']
   assert len(captured['rawCaptions'])==1,captured
   assert 2<=captured['rawCaptions'][0]['start']<2.5,captured
+  assert captured['transcriptMeta']['asrSegments'][0]['audioBytes']>1000,captured
+  assert captured['transcriptMeta']['asrSegments'][0]['audioLevel']>0,captured
   assert recorder.evaluate('window.asrRequests')==1
+  converted=recorder.evaluate('''async()=>{const {prepareSpeechAudio,DOUBAO_ASR_URL}=await import('../services/speech.js');const wav=await prepareSpeechAudio(window.fixtureAsrAudio,{asrUrl:DOUBAO_ASR_URL});const v=new DataView(await wav.arrayBuffer());return {type:wav.type,size:wav.size,rate:v.getUint32(24,true),channels:v.getUint16(22,true)};}''')
+  assert converted['type']=='audio/wav' and converted['rate']==16000 and converted['channels']==1 and converted['size']>16000,converted
   assert command(action='state')['rate']==1.5
   page.evaluate('document.querySelector("video").insertAdjacentHTML("afterend",\'<div id="movie_player" class="ad-showing"></div>\')')
   assert command(action='state')['isAd']

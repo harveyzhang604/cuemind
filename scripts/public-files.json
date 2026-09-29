@@ -40,6 +40,7 @@
     "extension/services/platform.js",
     "extension/services/prompts.js",
     "extension/services/settings.js",
+    "extension/services/speech.js",
     "extension/services/supadata.js",
     "extension/services/tasks.js",
     "extension/services/wbi.js",

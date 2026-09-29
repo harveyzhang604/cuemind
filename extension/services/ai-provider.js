@@ -1,3 +1,11 @@
+import {
+  DOUBAO_ASR_URL,
+  DOUBAO_ASR_RESOURCE,
+  isDoubaoAsr,
+  speechUrl,
+  doubaoRequest,
+  doubaoSegments,
+} from './speech.js';
 export const defaults = {
   provider: 'openai',
   baseUrl: 'https://api.openai.com/v1',
@@ -11,6 +19,10 @@ export const defaults = {
   asrUrl: 'https://api.openai.com/v1',
   asrModel: 'whisper-1',
   asrKey: '',
+  asrRouting: 'shared',
+  domesticAsrUrl: DOUBAO_ASR_URL,
+  domesticAsrModel: DOUBAO_ASR_RESOURCE,
+  domesticAsrKey: '',
   transcriptProvider: 'platform',
   supadataApiKey: '',
   prompts: {},
@@ -150,6 +162,8 @@ export async function completion(settings, system, input, signal, capability = '
 export async function transcribe(blob, settings, signal, filename, options = {}) {
   const s = { ...defaults, ...settings };
   if (!s.asrKey) throw new Error('请先配置 ASR API Key。');
+  if (new URL(endpoint(s.asrUrl)).hostname === 'api.deepseek.com')
+    throw new Error('DeepSeek 用于文本翻译，请为音频识别配置独立 ASR 服务。');
   if (blob.size > 24 * 1024 * 1024)
     throw new Error('音频超过 24 MB，请选择较小文件或使用分块录音。');
   const extensions = {
@@ -171,6 +185,10 @@ export async function transcribe(blob, settings, signal, filename, options = {})
   form.append('model', s.asrModel);
   form.append('response_format', 'verbose_json');
   form.append('timestamp_granularities[]', 'segment');
+  const doubao = isDoubaoAsr(s);
+  const request = doubao
+    ? await doubaoRequest(blob, s)
+    : { headers: { Authorization: `Bearer ${s.asrKey}` }, body: form };
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
@@ -179,11 +197,11 @@ export async function transcribe(blob, settings, signal, filename, options = {})
     ? Math.min(180000, Math.max(5000, options.timeoutMs))
     : 180000;
   const timer = setTimeout(abort, timeoutMs);
+  let stage = '上传音频或等待服务响应';
   try {
-    const response = await fetch(`${endpoint(s.asrUrl)}/audio/transcriptions`, {
+    const response = await fetch(speechUrl({ ...s, asrUrl: endpoint(s.asrUrl) }), {
       method: 'POST',
-      headers: { Authorization: `Bearer ${s.asrKey}` },
-      body: form,
+      ...request,
       signal: controller.signal,
       redirect: 'error',
     });
@@ -195,7 +213,13 @@ export async function transcribe(blob, settings, signal, filename, options = {})
       }[response.status];
       throw new Error(reason || `ASR 请求失败（HTTP ${response.status}），请检查服务状态。`);
     }
+    stage = '接收识别结果';
+    if (doubao && response.headers.get('X-Api-Status-Code') === '20000003') {
+      if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
+      return [];
+    }
     const data = JSON.parse(await limitedText(response, 5_000_000));
+    if (doubao) data.segments = doubaoSegments(data, response.headers.get('X-Api-Status-Code'));
     if (
       !Array.isArray(data.segments) ||
       !data.segments.length ||
@@ -210,13 +234,17 @@ export async function transcribe(blob, settings, signal, filename, options = {})
           x.end <= x.start,
       )
     )
-      throw new Error('ASR 未返回有效的带时间戳 segments，请使用支持 verbose_json 的模型。');
+      throw new Error(
+        doubao
+          ? '豆包语音未返回有效的分句时间戳，请检查音频是否包含语音。'
+          : 'ASR 未返回有效的带时间戳 segments，请使用支持 verbose_json 的模型。',
+      );
     if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
     return data.segments;
   } catch (e) {
     if (controller.signal.aborted && !signal?.aborted)
       throw new Error(
-        `ASR 请求超过 ${Math.ceil(timeoutMs / 1000)} 秒仍无响应，请检查语音服务或网络。`,
+        `ASR 请求在${stage}阶段超过 ${Math.ceil(timeoutMs / 1000)} 秒仍无响应；已采集 ${Math.max(1, Math.round(blob.size / 1024))} KB 音频，请检查语音服务或网络。`,
       );
     throw e;
   } finally {

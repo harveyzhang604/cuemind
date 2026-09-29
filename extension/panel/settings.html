@@ -103,8 +103,21 @@
         <section class="card" id="speech-service">
           <h2>无字幕视频 · 语音转写</h2>
           <p class="hint">
-            使用支持带时间戳 verbose_json 的 Whisper-compatible
-            接口。扩展只采集当前标签页播放的音频，按 1× 实时播放以对齐时间戳；首段约 20
+            ASR 将音频转成原文字幕，DeepSeek 等文本模型负责翻译。两者的 Key 分别配置，不能混用。所有
+            Key 只保存在当前浏览器。
+          </p>
+          <label
+            >语音服务选择方式<select id="asrRouting">
+              <option value="shared">所有视频使用同一套 ASR</option>
+              <option value="platform">
+                按平台选择：YouTube 用海外配置，咪咕 / B 站用国内配置
+              </option>
+            </select></label
+          >
+          <h3 id="asr-shared-title">通用 / YouTube 语音服务</h3>
+          <p class="hint">
+            支持豆包语音及带时间戳 verbose_json 的 Whisper-compatible
+            接口。扩展只采集当前标签页播放的音频，按 1× 实时播放以对齐时间戳；首段约 10
             秒，后续每段约 1
             分钟，随播放进度持续识别。每段状态和失败原因会显示在字幕侧栏；结束采集后会处理剩余音频。也可上传
             24 MB 内的音频。
@@ -113,6 +126,7 @@
             >语音服务商<select id="asr-provider">
               <option value="groq">Groq</option>
               <option value="openai">OpenAI</option>
+              <option value="doubao">豆包语音 · 火山引擎（国内）</option>
               <option value="custom">自定义兼容服务</option>
             </select></label
           >
@@ -141,8 +155,47 @@
               target="_blank"
               rel="noopener noreferrer"
               >获取 OpenAI API Key ↗</a
+            >，或<a
+              href="https://console.volcengine.com/speech/app"
+              target="_blank"
+              rel="noopener noreferrer"
+              >获取豆包语音 API Key ↗</a
             >；请与上方 ASR 地址及模型匹配。
           </p>
+          <button type="button" class="button" id="test-asr-network">检查此服务连接</button>
+          <p id="asr-network-status" class="hint" role="status"></p>
+          <div id="domestic-asr-settings" hidden>
+            <h3>咪咕 / B 站语音服务</h3>
+            <p class="hint">
+              选择在视频正常播放时也能访问的服务。豆包语音使用独立的新版控制台 API
+              Key，需开通录音文件识别极速版；也可填写国内部署的兼容接口。扩展不会改变系统代理。
+            </p>
+            <label
+              >国内语音供应商<select id="domestic-asr-provider">
+                <option value="doubao">豆包语音 · 火山引擎</option>
+                <option value="custom">自定义 Whisper 兼容服务</option>
+              </select></label
+            >
+            <label>国内 ASR 地址<input id="domesticAsrUrl" type="url" /></label>
+            <div class="row">
+              <label>模型 / 资源 ID<input id="domesticAsrModel" /></label>
+              <label
+                >国内 ASR API Key<input id="domesticAsrKey" type="password" autocomplete="off"
+              /></label>
+            </div>
+            <p class="hint">
+              <a
+                href="https://console.volcengine.com/speech/app"
+                target="_blank"
+                rel="noopener noreferrer"
+                >获取豆包语音 API Key ↗</a
+              >。该 Key 与 DeepSeek、Groq、OpenAI Key 相互独立。
+            </p>
+            <button type="button" class="button" id="test-domestic-asr-network">
+              检查国内服务连接
+            </button>
+            <p id="domestic-asr-network-status" class="hint" role="status"></p>
+          </div>
         </section>
         <section class="card" id="subtitle-service">
           <h2>字幕服务</h2>

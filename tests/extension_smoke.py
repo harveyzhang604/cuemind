@@ -22,14 +22,16 @@ with sync_playwright() as p:
         page.reload();page.wait_for_load_state('networkidle')
         notes=rpc('NOTES',recordId=record['id']);assert len(notes['data'])==1,notes
         blocked=rpc('TASK',recordId=record['id'],capability='boundary');assert not blocked['ok'] and '笔记' in blocked['error'],blocked
-        config=settings['data'];config['apiKey']='TEST-SECRET-NEVER-EXPORT';config['asrKey']='ASR-SECRET-NEVER-EXPORT'
+        config=settings['data'];config['apiKey']='TEST-SECRET-NEVER-EXPORT';config['asrKey']='ASR-SECRET-NEVER-EXPORT';config['domesticAsrKey']='DOMESTIC-SECRET-NEVER-EXPORT';config['asrRouting']='platform'
         assert rpc('SAVE_SETTINGS',settings=config)['ok']
         backup=rpc('BACKUP');assert backup['ok'],backup
         assert 'TEST-SECRET' not in json.dumps(backup)
         assert 'ASR-SECRET' not in json.dumps(backup)
+        assert 'DOMESTIC-SECRET' not in json.dumps(backup)
         restored=rpc('RESTORE',backup=backup['data']);assert restored['ok'],restored
         assert len(rpc('NOTES',recordId=record['id'])['data'])==1
         restored_settings=rpc('GET_SETTINGS');assert restored_settings['ok'];assert restored_settings['data']['apiKey']=='TEST-SECRET-NEVER-EXPORT';assert restored_settings['data']['asrKey']=='ASR-SECRET-NEVER-EXPORT'
+        assert restored_settings['data']['domesticAsrKey']=='DOMESTIC-SECRET-NEVER-EXPORT'
         second=rpc('IMPORT',info=record['videoInfo'],raw=record['rawCaptions'])
         assert second['ok'] and second['data']['id']!=record['id'],second
         corrupt=json.loads(json.dumps(backup['data']))
@@ -41,8 +43,10 @@ with sync_playwright() as p:
         changed['settings']['baseUrl']='https://different.invalid/v1'
         changed['settings']['asrUrl']='https://different.invalid/v1'
         changed['settings']['apiKey']='FORGED'
+        changed['settings']['domesticAsrUrl']='https://different.invalid/v1'
+        changed['settings']['domesticAsrKey']='FORGED'
         assert rpc('RESTORE',backup=changed)['ok']
-        clean=rpc('GET_SETTINGS')['data'];assert clean['apiKey']=='' and clean['asrKey']==''
+        clean=rpc('GET_SETTINGS')['data'];assert clean['apiKey']=='' and clean['asrKey']=='' and clean['domesticAsrKey']==''
         # Locks are acquired before the first asynchronous database read.
         parallel=page.evaluate('async id=>Promise.all([1,2].map(()=>chrome.runtime.sendMessage({type:"TASK",recordId:id,capability:"translation"})))',second['data']['id'])
         assert sum(bool(x['ok']) for x in parallel)==1,parallel

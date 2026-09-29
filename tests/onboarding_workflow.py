@@ -33,6 +33,13 @@ with preview_server() as base,sync_playwright() as p:
  expect(page.locator('#record')).to_have_text('从当前进度继续识别');expect(page.locator('#record')).to_be_enabled();expect(page.locator('#capture-summary')).to_contain_text('00:10–00:30')
  assert not errors,errors
  settings=b.new_page();settings.goto(base+'/extension/panel/settings.html');expect(settings.locator('#asr-provider')).to_have_value('openai');settings.locator('#asrKey').fill('OLD-FIXTURE');settings.locator('#asr-provider').select_option('groq');expect(settings.locator('#asrUrl')).to_have_value('https://api.groq.com/openai/v1');expect(settings.locator('#asrModel')).to_have_value('whisper-large-v3-turbo');expect(settings.locator('#asrKey')).to_have_value('');settings.locator('#asrUrl').fill('https://custom.example/v1');expect(settings.locator('#asr-provider')).to_have_value('custom')
+ settings.locator('#asrRouting').select_option('platform');expect(settings.locator('#domestic-asr-settings')).to_be_visible()
+ expect(settings.locator('#domestic-asr-provider')).to_have_value('doubao')
+ settings.locator('#asrKey').fill('OVERSEAS-FIXTURE');settings.locator('#domesticAsrKey').fill('DOMESTIC-FIXTURE')
+ settings.locator('#domestic-asr-provider').select_option('custom');settings.locator('#domesticAsrUrl').fill('https://domestic.example/v1')
+ settings.locator('#domestic-asr-provider').select_option('doubao');expect(settings.locator('#domesticAsrKey')).to_have_value('');expect(settings.locator('#asrKey')).to_have_value('OVERSEAS-FIXTURE')
+ settings.locator('#asrKey').fill('');settings.set_viewport_size({'width':1000,'height':1800})
+ settings.locator('#speech-service').screenshot(path=str(ROOT/'docs/screenshots/asr-routing-20260929.png'))
  for width in [320,430,900]:
   settings.set_viewport_size({'width':width,'height':760});assert settings.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
  b.close()

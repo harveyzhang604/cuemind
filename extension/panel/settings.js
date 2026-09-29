@@ -1,6 +1,7 @@
 import { prompts } from '../services/prompts.js';
 import { promptExamples, defaultDescriptions } from './prompt-examples.js';
 import { defaults, endpoint } from '../services/ai-provider.js';
+import { DOUBAO_ASR_URL, DOUBAO_ASR_RESOURCE, checkSpeechNetwork } from '../services/speech.js';
 const $ = (s) => document.querySelector(s);
 const ext = !!globalThis.chrome?.runtime?.id;
 const capabilities = {
@@ -178,6 +179,10 @@ for (const key of [
   'asrUrl',
   'asrModel',
   'asrKey',
+  'asrRouting',
+  'domesticAsrUrl',
+  'domesticAsrModel',
+  'domesticAsrKey',
   'preBuffer',
   'postBuffer',
   'maxTokens',
@@ -220,6 +225,7 @@ function updateModelKeyHelp() {
 updateModelKeyHelp();
 $('#baseUrl').addEventListener('input', updateModelKeyHelp);
 const asrPresets = {
+  doubao: [DOUBAO_ASR_URL, DOUBAO_ASR_RESOURCE],
   groq: ['https://api.groq.com/openai/v1', 'whisper-large-v3-turbo'],
   openai: ['https://api.openai.com/v1', 'whisper-1'],
 };
@@ -243,6 +249,50 @@ $('#asr-provider').onchange = () => {
   $('#asr-preset-help').textContent = '已填写地址与模型，请填写此服务的 API Key 后保存。';
 };
 for (const id of ['asrUrl', 'asrModel']) $('#' + id).addEventListener('input', detectAsrProvider);
+
+function showSpeechRouting() {
+  $('#domestic-asr-settings').hidden = $('#asrRouting').value !== 'platform';
+  $('#asr-shared-title').textContent =
+    $('#asrRouting').value === 'platform' ? 'YouTube 语音服务' : '通用语音服务';
+}
+$('#asrRouting').onchange = showSpeechRouting;
+showSpeechRouting();
+function detectDomesticProvider() {
+  $('#domestic-asr-provider').value =
+    $('#domesticAsrUrl').value.replace(/\/$/, '') === DOUBAO_ASR_URL ? 'doubao' : 'custom';
+}
+detectDomesticProvider();
+$('#domestic-asr-provider').onchange = () => {
+  if ($('#domestic-asr-provider').value !== 'doubao') return;
+  if ($('#domesticAsrUrl').value.replace(/\/$/, '') !== DOUBAO_ASR_URL)
+    $('#domesticAsrKey').value = '';
+  $('#domesticAsrUrl').value = DOUBAO_ASR_URL;
+  $('#domesticAsrModel').value = DOUBAO_ASR_RESOURCE;
+};
+$('#domesticAsrUrl').addEventListener('input', detectDomesticProvider);
+for (const [button, output, field] of [
+  ['test-asr-network', 'asr-network-status', 'asrUrl'],
+  ['test-domestic-asr-network', 'domestic-asr-network-status', 'domesticAsrUrl'],
+]) {
+  $('#' + button).onclick = async () => {
+    const control = $('#' + button),
+      status = $('#' + output);
+    control.disabled = true;
+    status.textContent = '正在检查连接（最多 8 秒，不发送 Key 或音频）…';
+    try {
+      if (!ext) throw new Error('请在已加载的扩展中检查连接。');
+      const asrUrl = endpoint($('#' + field).value);
+      if (!(await chrome.permissions.request({ origins: [new URL(asrUrl).origin + '/*'] })))
+        throw new Error('尚未授予此服务的访问权限。');
+      const result = await checkSpeechNetwork({ asrUrl });
+      status.textContent = `${result.host} 可连接（${result.elapsedMs} 毫秒）。这仅验证网络；Key、额度和模型须在实际识别时确认。`;
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      control.disabled = false;
+    }
+  };
+}
 
 $('#provider').onchange = () => {
   const presets = {
@@ -282,6 +332,10 @@ $('#settings-form').onsubmit = async (e) => {
       'asrUrl',
       'asrModel',
       'asrKey',
+      'asrRouting',
+      'domesticAsrUrl',
+      'domesticAsrModel',
+      'domesticAsrKey',
     ])
       next[key] = $('#' + key).value.trim();
     for (const key of ['preBuffer', 'postBuffer', 'maxTokens'])
@@ -289,6 +343,7 @@ $('#settings-form').onsubmit = async (e) => {
     next.timeout = Number($('#timeout').value) * 1000;
     next.baseUrl = endpoint(next.baseUrl);
     next.asrUrl = endpoint(next.asrUrl || defaults.asrUrl);
+    next.domesticAsrUrl = endpoint(next.domesticAsrUrl || defaults.domesticAsrUrl);
     for (const key of Object.keys(capabilities)) {
       next.prompts[key] = $('#prompt-' + key).value;
       next.models[key] = $('#model-' + key).value.trim();
@@ -298,6 +353,7 @@ $('#settings-form').onsubmit = async (e) => {
         [
           next.baseUrl,
           ...(next.asrKey ? [next.asrUrl] : []),
+          ...(next.domesticAsrKey ? [next.domesticAsrUrl] : []),
           ...(next.supadataApiKey ? ['https://api.supadata.ai'] : []),
         ].map((url) => new URL(url).origin + '/*'),
       ),

@@ -83,6 +83,51 @@ test('only supported video URLs produce platform keys',()=>{
   assert.equal(keyFromUrl('https://www.youtube.com/watch?v=abc'),'youtube:abc:1');
   for(const url of ['https://evil.invalid/watch?v=a','https://www.bilibili.com/video/BV123?p=-1','javascript:alert(1)'])assert.equal(keyFromUrl(url),null);
 });
+test('domestic and overseas speech routes isolate keys and backups reject substituted credentials',async()=>{
+  const {speechSettings,DOUBAO_ASR_URL}=await import('../extension/services/speech.js');
+  const cfg=validateSettings({asrRouting:'platform',asrKey:'overseas-fixture',domesticAsrKey:'domestic-fixture'});
+  assert.equal(speechSettings(cfg,'youtube').asrKey,'overseas-fixture');
+  for(const platform of ['migu','bilibili']) {
+    assert.equal(speechSettings(cfg,platform).asrKey,'domestic-fixture');
+    assert.equal(speechSettings(cfg,platform).asrUrl,DOUBAO_ASR_URL);
+  }
+  assert.equal(speechSettings({...cfg,domesticAsrKey:''},'migu').asrKey,'');
+  assert.equal(restoreSettings({...cfg,domesticAsrKey:'forged'},cfg).domesticAsrKey,'domestic-fixture');
+  assert.equal(restoreSettings({...cfg,domesticAsrUrl:'https://other.invalid',domesticAsrKey:'forged'},cfg).domesticAsrKey,'');
+});
+test('Doubao uploads WAV with independent credentials and converts millisecond utterances',async()=>{
+  const {DOUBAO_ASR_URL,DOUBAO_ASR_RESOURCE,pcmWave}=await import('../extension/services/speech.js');
+  const previous=global.fetch;let sent;let status='20000000';
+  const audio=pcmWave(new Float32Array([0,-1,1]));
+  const view=new DataView(await audio.arrayBuffer());
+  assert.equal(view.getUint32(24,true),16000);assert.equal(view.getInt16(46,true),-32768);
+  global.fetch=async(url,options)=>{
+    sent={url,...options};
+    return new Response(JSON.stringify({result:{utterances:[{start_time:450,end_time:1530,text:'Hello.'}]}}),{headers:{'X-Api-Status-Code':status}});
+  };
+  try {
+    const cfg={asrUrl:DOUBAO_ASR_URL,asrModel:DOUBAO_ASR_RESOURCE,asrKey:'domestic-fixture',apiKey:'text-fixture'};
+    const result=await transcribe(audio,cfg);
+    assert.deepEqual(result,[{start:.45,end:1.53,text:'Hello.'}]);
+    assert.equal(sent.url,DOUBAO_ASR_URL);assert.equal(sent.headers['X-Api-Key'],'domestic-fixture');
+    assert.equal(sent.headers.Authorization,undefined);assert.ok(!sent.body.includes('text-fixture'));
+    assert.equal(Buffer.from(JSON.parse(sent.body).audio.data,'base64').toString('ascii',0,4),'RIFF');
+    status='20000003';assert.deepEqual(await transcribe(audio,cfg),[]);
+    status='45000151';await assert.rejects(()=>transcribe(audio,cfg),/音频格式/);
+  } finally {global.fetch=previous;}
+});
+test('speech network check sends neither keys nor audio and accepts method-not-allowed as reachable',async()=>{
+  const {checkSpeechNetwork}=await import('../extension/services/speech.js');
+  const previous=global.fetch;let sent;
+  global.fetch=async(url,options)=>{sent=options;return new Response('',{status:405});};
+  try {
+    assert.equal((await checkSpeechNetwork({asrUrl:'https://speech.example/v1',asrKey:'secret'})).status,405);
+    assert.equal(sent.method,'HEAD');assert.equal(sent.body,undefined);assert.equal(sent.headers,undefined);
+    await assert.rejects(()=>checkSpeechNetwork({asrUrl:'https://api.deepseek.com'}),/用于文本翻译/);
+    global.fetch=async()=>{throw new TypeError('Failed to fetch');};
+    await assert.rejects(()=>checkSpeechNetwork({asrUrl:'https://speech.example/v1'}),/无法连接语音服务 speech.example/);
+  } finally {global.fetch=previous;}
+});
 test('ASR preserves original audio filename and rejects invalid timestamps',async()=>{
   const previous=global.fetch;let form,valid=true;
   global.fetch=async(url,options)=>{form=options.body;return new Response(JSON.stringify({segments:[{start:valid?0:-1,end:2,text:'speech'}]}));};
@@ -101,7 +146,7 @@ test('ASR request timeout aborts a stalled upload and reports the configured wai
   try{
     await assert.rejects(
       ()=>transcribe(new Blob(['audio'],{type:'audio/webm'}),{asrKey:'test'},undefined,undefined,{timeoutMs:5000}),
-      /超过 5 秒仍无响应/
+      /上传音频或等待服务响应阶段超过 5 秒仍无响应；已采集 1 KB 音频/
     );
     assert.equal(requests,1);
   }finally{global.fetch=previous;}

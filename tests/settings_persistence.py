@@ -14,8 +14,9 @@ with preview_server() as base,sync_playwright() as p:
   assert page.evaluate('JSON.parse(sessionStorage.getItem("stored")).supadataApiKey')=='fixture-subtitle-key'
   page.evaluate('sessionStorage.removeItem("failure")');page.get_by_role('button',name='重试读取设置').click()
   expect(page.locator('#transcriptProvider')).to_have_value('fallback');expect(page.locator('#supadataApiKey')).to_have_value('fixture-subtitle-key')
+  page.locator('#asrRouting').select_option('platform');page.locator('#domesticAsrKey').fill('fixture-domestic-key');
   page.locator('#model').fill('fixture-model');page.get_by_role('button',name='保存设置',exact=True).click();expect(page.locator('#save-status')).to_contain_text('已保存');page.reload()
-  for key,value in [('transcriptProvider','fallback'),('supadataApiKey','fixture-subtitle-key'),('apiKey','fixture-text-key'),('asrKey','fixture-speech-key'),('model','fixture-model')]:expect(page.locator('#'+key)).to_have_value(value)
+  for key,value in [('transcriptProvider','fallback'),('supadataApiKey','fixture-subtitle-key'),('apiKey','fixture-text-key'),('asrKey','fixture-speech-key'),('model','fixture-model'),('asrRouting','platform'),('domesticAsrKey','fixture-domestic-key')]:expect(page.locator('#'+key)).to_have_value(value)
   for mode in ['denied','rejected','pending']:
    page.evaluate("mode=>{chrome.permissions.request=()=>mode==='pending'?new Promise(()=>{}):mode==='rejected'?Promise.reject(new Error('permission unavailable')):Promise.resolve(false)}",mode)
    page.locator('#supadataApiKey').fill('fixture-'+mode);page.get_by_role('button',name='保存设置',exact=True).click()

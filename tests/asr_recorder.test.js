@@ -4,10 +4,10 @@ import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
 import { planAsrSegments } from '../extension/core/asr-progress.js';
 
-test('offscreen recorder advances from a 20-second segment to the next one-minute segment', async () => {
+test('offscreen recorder advances from a 10-second segment to the next one-minute segment', async () => {
   const source = (
     await readFile(new URL('../extension/offscreen/recorder.js', import.meta.url), 'utf8')
-  ).replace(/^import [^\n]+\n/, '');
+  ).replace(/^import [^\n]+\n/gm, '');
   const messages = [];
   const timers = new Map();
   let listener;
@@ -28,6 +28,15 @@ test('offscreen recorder advances from a 20-second segment to the next one-minut
     createMediaStreamSource() {
       return { connect() {} };
     }
+    createAnalyser() {
+      return {
+        fftSize: 2048,
+        connect() {},
+        getByteTimeDomainData(samples) {
+          samples.fill(140);
+        },
+      };
+    }
     async resume() {}
     async close() {}
     get destination() {
@@ -36,6 +45,7 @@ test('offscreen recorder advances from a 20-second segment to the next one-minut
   }
   const context = {
     AbortController,
+    prepareSpeechAudio: async (blob) => blob,
     AudioContext: Audio,
     Blob,
     MediaRecorder: Recorder,
@@ -55,6 +65,10 @@ test('offscreen recorder advances from a 20-second segment to the next one-minut
     clearTimeout(id) {
       timers.delete(id);
     },
+    setInterval() {
+      return ++timerId;
+    },
+    clearInterval() {},
     transcribe: async () => [{ start: 0, end: 2, text: 'Recognized.' }],
     chrome: {
       runtime: {
@@ -85,21 +99,26 @@ test('offscreen recorder advances from a 20-second segment to the next one-minut
     for (let i = 0; i < 60 && !predicate(); i++) await new Promise(setImmediate);
     assert.ok(predicate(), 'recorder did not reach the expected stage');
   };
-  const plan = planAsrSegments(0, 80);
+  const plan = planAsrSegments(0, 70);
   assert.equal((await command('START', { streamId: 'stream', settings: {}, plan })).ok, true);
   assert.equal((await command('RUN')).ok, true);
   await flush(() => messages.some((m) => m.type === 'ASR_PROGRESS' && m.status === 'capturing'));
-  assert.equal([...timers.values()][0].ms, 20000);
-  playhead = 20;
+  assert.equal([...timers.values()][0].ms, 10000);
+  playhead = 10;
   [...timers.values()][0].fn();
   await flush(() => messages.some((m) => m.type === 'ASR_CHUNK' && m.segmentId === plan[0].id));
+  const recognizing = messages.find(
+    (m) => m.type === 'ASR_PROGRESS' && m.segmentId === plan[0].id && m.status === 'recognizing',
+  );
+  assert.equal(recognizing.audioBytes, 1500);
+  assert.ok(recognizing.audioLevel > 0.09);
   await flush(() =>
     messages.some(
       (m) => m.type === 'ASR_PROGRESS' && m.segmentId === plan[1].id && m.status === 'capturing',
     ),
   );
   assert.equal([...timers.values()][0].ms, 60000);
-  playhead = 80;
+  playhead = 70;
   [...timers.values()][0].fn();
   await flush(() => messages.some((m) => m.type === 'ASR_FINISHED'));
   const chunks = messages.filter((m) => m.type === 'ASR_CHUNK');
@@ -107,12 +126,12 @@ test('offscreen recorder advances from a 20-second segment to the next one-minut
     chunks.map((m) => [m.segmentId, m.segments[0].start]),
     [
       [plan[0].id, 0],
-      [plan[1].id, 20],
+      [plan[1].id, 10],
     ],
   );
   assert.deepEqual(
     chunks.map((m) => m.capturedEnd),
-    [20, 80],
+    [10, 70],
   );
   assert.equal(messages.at(-1).type, 'ASR_FINISHED');
 });
@@ -120,7 +139,7 @@ test('offscreen recorder advances from a 20-second segment to the next one-minut
 test('a timed-out ASR chunk fails once, stops capture, and preserves a retryable segment', async () => {
   const source = (
     await readFile(new URL('../extension/offscreen/recorder.js', import.meta.url), 'utf8')
-  ).replace(/^import [^\n]+\n/, '');
+  ).replace(/^import [^\n]+\n/gm, '');
   const messages = [];
   const timers = new Map();
   let listener;
@@ -150,6 +169,7 @@ test('a timed-out ASR chunk fails once, stops capture, and preserves a retryable
   }
   const context = {
     AbortController,
+    prepareSpeechAudio: async (blob) => blob,
     AudioContext: Audio,
     Blob,
     MediaRecorder: Recorder,
@@ -169,6 +189,7 @@ test('a timed-out ASR chunk fails once, stops capture, and preserves a retryable
     clearTimeout(id) {
       timers.delete(id);
     },
+    clearInterval() {},
     async transcribe(_blob, _settings, _signal, _filename, options) {
       calls++;
       assert.equal(options.timeoutMs, 45000);
