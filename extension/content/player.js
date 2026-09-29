@@ -42,6 +42,31 @@
     arrowPending = null,
     spaceHeld = false;
   const player = () => document.querySelector('video');
+  const miguPage = ['www.miguvideo.com', 'miguvideo.com'].includes(location.hostname);
+  function parseClock(value) {
+    const parts = String(value || '')
+      .trim()
+      .split(':');
+    if (!parts.length || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) return NaN;
+    return parts.reduce((seconds, part) => seconds * 60 + Number(part), 0);
+  }
+  function playbackTime(v) {
+    if (!miguPage || v.readyState < 2) return v.currentTime;
+    const shown = parseClock(document.querySelector('#mod-player .cur-time')?.textContent);
+    const duration = playbackDuration(v);
+    return Number.isFinite(shown) && (!Number.isFinite(duration) || shown <= duration + 2)
+      ? shown
+      : v.currentTime;
+  }
+  function playbackDuration(v) {
+    const shown = miguPage
+      ? parseClock(document.querySelector('#mod-player .end-time')?.textContent)
+      : NaN;
+    return Number.isFinite(shown) ? shown : v.duration;
+  }
+  function mediaTime(v, displayed) {
+    return miguPage ? Math.max(0, displayed - (playbackTime(v) - v.currentTime)) : displayed;
+  }
   function cleanup(preserveNotice = false) {
     clearTimeout(arrowPending?.timer);
     arrowPending = null;
@@ -102,21 +127,22 @@
     const v = player();
     return v
       ? {
-          time: v.currentTime,
-          duration: v.duration,
+          time: playbackTime(v),
+          duration: playbackDuration(v),
           paused: v.paused,
           rate: v.playbackRate,
           videoKey: key(),
           session: !!session,
           rangeStart:
             session?.ranges[session.index].start ??
-            (v.paused && lastRange && Math.abs(v.currentTime - lastRange.end) < 0.6
+            (v.paused && lastRange && Math.abs(playbackTime(v) - lastRange.end) < 0.6
               ? lastRange.start
               : null),
           rangeEnd: session?.ranges[session.index].end ?? null,
           repeat,
           seeking: v.seeking,
           readyState: v.readyState,
+          unavailable: miguPage && v.readyState < 2,
           captureLocked,
           focusCaptionsEnabled: !!focusConfig?.enabled,
           focusCaptionsClosed: focusClosed,
@@ -176,7 +202,7 @@
     if (m.action === 'seek') {
       if (!Number.isFinite(m.time) || m.time < 0) throw new Error('跳转时间无效');
       stop();
-      v.currentTime = m.time;
+      v.currentTime = mediaTime(v, m.time);
       return true;
     }
     if (m.action === 'rate') {
@@ -196,7 +222,7 @@
           !Number.isFinite(r.end) ||
           r.start < 0 ||
           r.end <= r.start ||
-          (Number.isFinite(v.duration) && r.start >= v.duration),
+          (Number.isFinite(playbackDuration(v)) && r.start >= playbackDuration(v)),
       )
     )
       throw new Error('播放范围无效');
@@ -223,9 +249,9 @@
     const seek = () => {
       lastRange = {
         ...token.ranges[token.index],
-        end: Math.min(v.duration, token.ranges[token.index].end + token.post),
+        end: Math.min(playbackDuration(v), token.ranges[token.index].end + token.post),
       };
-      v.currentTime = Math.max(0, token.ranges[token.index].start - token.pre);
+      v.currentTime = mediaTime(v, Math.max(0, token.ranges[token.index].start - token.pre));
       return v.play();
     };
     const tick = () => {
@@ -235,16 +261,19 @@
         return;
       }
       if (v.seeking) return;
-      const boundary = Math.min(v.duration, token.ranges[token.index].end + token.post);
-      if (v.currentTime >= boundary - (token.strict ? 0.012 * v.playbackRate : 0) || v.ended) {
+      const boundary = Math.min(playbackDuration(v), token.ranges[token.index].end + token.post);
+      if (playbackTime(v) >= boundary - (token.strict ? 0.012 * v.playbackRate : 0) || v.ended) {
         if (token.remaining > 1) token.remaining--;
         else if (token.index + 1 < token.ranges.length) {
           token.index++;
           token.remaining = token.count === -1 ? Infinity : token.count;
         } else {
           stop(true, true);
-          if (token.strict && v.currentTime >= boundary)
-            v.currentTime = Math.max(token.ranges[token.index].start, boundary - 0.001);
+          if (token.strict && playbackTime(v) >= boundary)
+            v.currentTime = mediaTime(
+              v,
+              Math.max(token.ranges[token.index].start, boundary - 0.001),
+            );
           return;
         }
         seek().catch(() => {
@@ -529,11 +558,11 @@
       return;
     }
     const v = player();
-    if (!v || isAd() || !attachFocus(v)) {
+    if (!v || (miguPage && v.readyState < 2) || isAd() || !attachFocus(v)) {
       hideFocus();
       return;
     }
-    const t = v.currentTime,
+    const t = playbackTime(v),
       list = focusConfig.sentences;
     // Last starting cue wins if native subtitle timing has a small overlap.
     let lo = 0,
@@ -722,8 +751,8 @@
       time: Math.max(
         0,
         Math.min(
-          Number.isFinite(v.duration) ? v.duration : Infinity,
-          v.currentTime + direction * 5,
+          Number.isFinite(playbackDuration(v)) ? playbackDuration(v) : Infinity,
+          playbackTime(v) + direction * 5,
         ),
       ),
       videoKey: key(),
@@ -883,10 +912,10 @@
         focus = snapshot().rangeStart;
       let i =
         focus == null
-          ? list.findIndex((s) => s.start <= v.currentTime && v.currentTime < s.end)
+          ? list.findIndex((s) => s.start <= playbackTime(v) && playbackTime(v) < s.end)
           : list.findIndex((s) => s.start === focus);
       if (i < 0) {
-        i = list.findLastIndex((s) => s.start <= v.currentTime);
+        i = list.findLastIndex((s) => s.start <= playbackTime(v));
         i = Math.max(0, i);
       }
       if (action === 'j') i = Math.max(0, i - 1);

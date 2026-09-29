@@ -101,6 +101,7 @@
     "tests/focus.test.js",
     "tests/focus_panel.py",
     "tests/focus_player.py",
+    "tests/migu_clock.py",
     "tests/onboarding_workflow.py",
     "tests/panel_follow.py",
     "tests/panel_race.py",

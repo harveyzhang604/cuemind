@@ -190,7 +190,7 @@ test('Migu cache is isolated by programme and reuses imported/transcribed captio
  assert.equal(matchesVideoUrl(saved.videoKey,'https://evil.invalid/p/live/120000587094'),false);
 });
 
-test('Migu audio recognition continues after saved audio and reuses prior translations', async () => {
+test('Migu audio recognition resumes saved audio but invalidates legacy ungrounded translations', async () => {
  const f = await fixture(), seeks = [], playback = {time:10,duration:180,rate:1,paused:true,isAd:false};
  f.inspection.info = {platform:'migu',videoId:'120000587094',page:967772705,title:'English main card',duration:180,url:'https://www.miguvideo.com/p/live/120000587094'};
  const loaded = await f.route({type:'LOAD',tabId:1});
@@ -221,7 +221,7 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  assert.equal(next.transcriptMeta.asrSegments[0].start,seeks[0]);
  assert.equal(next.transcriptMeta.asrSegments[0].end,seeks[0]+10);
  assert.equal(next.rawCaptions.length,1);
- assert.equal(next.sentences[0].translation,'第一回合。');
+ assert.equal(next.sentences[0].translation,undefined);
  const listener = f.listeners[0],sender={id:'fixture',url:'chrome-extension://fixture/offscreen/index.html'};
  const event = m => new Promise((resolve,reject)=>{
   const pending=listener(m,sender,reply=>reply?.ok?resolve(reply):reject(new Error(reply?.error||'missing reply')));
@@ -232,7 +232,7 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  await event({type:'ASR_CHUNK',recordId:next.id,segmentId:firstSegment.id,capturedEnd:80,segments:[{start:71,end:73,text:'Second round.'}],completed:1});
  const saved = f.stores.videos.get(next.id);
  assert.equal(saved.rawCaptions.length,2);
- assert.equal(saved.sentences[0].translation,'第一回合。');
+ assert.equal(saved.sentences[0].translation,undefined);
  assert.equal(saved.sentences[1].rawText,'Second round.');
  assert.equal(saved.transcriptMeta.asrSegments[0].status,'source-ready');
  playback.time=130;

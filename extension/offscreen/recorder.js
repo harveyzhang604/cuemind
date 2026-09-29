@@ -61,6 +61,8 @@ async function recordChunk(s) {
     if (!segment) return stop(s);
     const current = await position(s);
     if (s.stopping) return finish(s);
+    if (current.unavailable || (current.readyState != null && current.readyState < 2))
+      throw new Error('播放器正在重新加载，音频采集已停止；此前完成的字幕已保留。');
     const chunks = [];
     const offset = current.time;
     if (segment.end - offset < 1) return stop(s);

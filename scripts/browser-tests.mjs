@@ -10,6 +10,7 @@ const tests = [
   'explanation_modal',
   'zara_browser',
   'bilibili_follow',
+  'migu_clock',
   'replay_keyboard',
 ];
 for (const name of tests) {

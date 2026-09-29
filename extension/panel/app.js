@@ -310,6 +310,7 @@ async function leaveVideo() {
 }
 async function load(refresh = false, trackId) {
   saveReading();
+  automaticTranslationRecordId = null;
   asrOpen = false;
   const gen = ++generation;
   progressVersion++;
@@ -842,7 +843,16 @@ let lastPlayerTick = 0,
   lastContentPaused = null,
   playingRange = null;
 function receivePlayerState(m) {
-  if (m.tabId !== tabId || m.videoKey !== record?.videoKey || !Number.isFinite(m.time)) return;
+  if (m.tabId !== tabId || m.videoKey !== record?.videoKey) return;
+  if (m.unavailable && record?.videoInfo.platform === 'migu') {
+    $('#play-state').textContent = '播放器重新加载中';
+    if (active !== -1) {
+      active = -1;
+      highlight();
+    }
+    return;
+  }
+  if (!Number.isFinite(m.time)) return;
   playerStateRevision++;
   lastPlayerTick = Date.now();
   // Ads use the same video element but have their own timeline.
@@ -947,7 +957,7 @@ async function syncPlayerState() {
   }
 }
 setInterval(syncPlayerState, 2000);
-async function bindPlayer() {
+async function bindPlayer(refreshOverlay = false) {
   if (!ext || !record || record.videoInfo.platform === 'demo') return;
   await rpc('PLAYER_COMMAND', {
     tabId,
@@ -963,7 +973,7 @@ async function bindPlayer() {
     },
   });
   await syncPlayerState();
-  await focus.sendOverlay();
+  await focus.sendOverlay(refreshOverlay);
 }
 async function task(capability, args = {}) {
   requireRecord();
@@ -2816,7 +2826,7 @@ if (ext) {
       record = m.record;
       if (captureInfo) captureInfo.completed = m.completed;
       render();
-      bindPlayer().catch(error);
+      bindPlayer(true).catch(error);
     }
     if (m.event === 'asr-finished') {
       if (!captureInfo || captureInfo.recordId === m.recordId) {
@@ -2831,7 +2841,7 @@ if (ext) {
             if (gen === generation && r.id === record?.id) {
               record = r;
               render();
-              bindPlayer();
+              bindPlayer(true).catch(error);
             }
           })
           .catch(error);
@@ -3869,6 +3879,11 @@ function translationSignature() {
     settings.models?.translation || settings.model,
     settings.targetLanguage,
     settings.prompts?.translation || '',
+    ...(record?.videoInfo?.platform === 'migu' &&
+    record.transcriptMeta?.source?.startsWith('whisper') &&
+    /中文|Chinese|zh/i.test(settings.targetLanguage || '简体中文')
+      ? ['source-only-v2']
+      : []),
   ]);
 }
 function applyTranslationDisplay() {

@@ -76,13 +76,18 @@ async function settings() {
     ...(await chrome.storage.local.get('settings')).settings,
   });
 }
-const translationSignature = (cfg) =>
+const translationSignature = (cfg, record) =>
   JSON.stringify([
     cfg.provider,
     cfg.baseUrl,
     cfg.models?.translation || cfg.model,
     cfg.targetLanguage,
     cfg.prompts?.translation || '',
+    ...(record?.videoInfo?.platform === 'migu' &&
+    record.transcriptMeta?.source?.startsWith('whisper') &&
+    /中文|Chinese|zh/i.test(cfg.targetLanguage || '简体中文')
+      ? ['source-only-v2']
+      : []),
   ]);
 function assertAvailable(recordId, capability = 'exclusive') {
   if (
@@ -185,7 +190,13 @@ function makeRecord(info, raw, meta, id) {
     rawCaptions: raw,
     sentences,
     paragraphs: paragraphs(sentences),
-    transcriptMeta: { ...meta, generatedAt: new Date().toISOString() },
+    transcriptMeta: {
+      ...meta,
+      generatedAt: new Date().toISOString(),
+      ...(info.platform === 'migu' && meta.source?.startsWith('whisper')
+        ? { translationRevision: 2 }
+        : {}),
+    },
     schemaVersion: SCHEMA_VERSION,
     updatedAt: Date.now(),
   };
@@ -198,7 +209,23 @@ async function store(record) {
 async function requireRecord(id) {
   const record = await db.get('videos', id);
   if (!record) throw new Error('请先读取或导入字幕。');
+  if (await migrateMiguAsrTranslations(record)) await store(record);
   return record;
+}
+async function migrateMiguAsrTranslations(record) {
+  if (
+    record.videoInfo?.platform !== 'migu' ||
+    !record.transcriptMeta?.source?.startsWith('whisper') ||
+    record.transcriptMeta.translationRevision === 2
+  )
+    return false;
+  for (const sentence of record.sentences || []) delete sentence.translation;
+  record.translationCaches = {};
+  if (record.tasks) delete record.tasks.translation;
+  for (const segment of record.transcriptMeta.asrSegments || [])
+    if (['done', 'translation-failed'].includes(segment.status)) segment.status = 'source-ready';
+  record.transcriptMeta.translationRevision = 2;
+  return true;
 }
 const quickNotes = new Set();
 async function quickNote(tabId) {
@@ -494,10 +521,11 @@ async function route(m) {
       )
         return result;
       const cfg = await settings();
+      const migrated = await migrateMiguAsrTranslations(result.record);
       const recovered = recoverEquivalentLearning(result.record, await db.all('videos'), {
-        translationSignature: translationSignature(cfg),
+        translationSignature: translationSignature(cfg, result.record),
       });
-      if (recovered.translations || recovered.focus || recovered.cacheEntries)
+      if (migrated || recovered.translations || recovered.focus || recovered.cacheEntries)
         await store(result.record);
       return {
         ...result,
@@ -603,6 +631,29 @@ async function route(m) {
       const result = await runTask(record, m.capability, config, m.args || {}, signal, store, (p) =>
         notify({ event: 'progress', recordId: record.id, ...p }),
       );
+      if (
+        m.capability === 'translation' &&
+        record.videoInfo.platform === 'migu' &&
+        record.transcriptMeta.source?.startsWith('whisper')
+      ) {
+        let changed = false;
+        for (const segment of record.transcriptMeta.asrSegments || []) {
+          const rows = record.sentences.filter(
+            (sentence) =>
+              sentence.start >= segment.start - 0.75 && sentence.start < segment.end + 0.75,
+          );
+          if (
+            rows.length &&
+            rows.every((sentence) => sentence.translation) &&
+            segment.status !== 'done'
+          ) {
+            segment.status = 'done';
+            delete segment.error;
+            changed = true;
+          }
+        }
+        if (changed) await store(record);
+      }
       if (signal.aborted) throw new DOMException('已取消', 'AbortError');
       if (['qa', 'explain'].includes(m.capability))
         await db.put('chats', {
@@ -839,6 +890,8 @@ async function route(m) {
       await checkSpeechNetwork(cfg, session.preflightController.signal);
       let state = await player(m.tabId, { action: 'state', videoKey: original.videoKey });
       if (state.isAd) throw new Error('正在播放广告，请等正片开始后再识别音频。');
+      if (state.unavailable || (state.readyState != null && state.readyState < 2))
+        throw new Error('播放器尚未载入可播放的视频音频，请开始播放后再识别。');
       if (!Number.isFinite(state.duration) || state.time >= state.duration)
         throw new Error('请先将视频移动到要转写的位置');
       session.migu = original.videoInfo.platform === 'migu';
@@ -882,7 +935,10 @@ async function route(m) {
       session.wasPaused = state.paused;
       session.videoKey = original.videoKey;
       session.startTime = state.time;
-      session.translationSignature = translationSignature(cfg);
+      session.translationSignature = translationSignature(cfg, {
+        videoInfo: original.videoInfo,
+        transcriptMeta: { source: 'whisper' },
+      });
       session.seedRecord = previousAsr ? original : null;
       session.settings = cfg;
       session.translationAttempted = new Set();

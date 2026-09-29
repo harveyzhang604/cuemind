@@ -15,6 +15,21 @@ import {
   uncoveredIds,
 } from '../core/sentence.js';
 import { qaContext, validateAnswer } from '../core/retrieval.js';
+// Reject obviously unrelated ASR translations before they reach the persistent cache.
+// This is deliberately conservative: semantic quality still depends on the model.
+export function groundedTranslation(source, target) {
+  if (typeof source !== 'string' || typeof target !== 'string' || !target.trim()) return false;
+  const original = source.trim(),
+    translated = target.trim();
+  if (original.length < 90 && translated.length > Math.max(45, original.length * 1.2)) return false;
+  const numbers = translated.match(/\d+(?:[.,]\d+)*/g) || [];
+  if (numbers.some((number) => !original.includes(number))) return false;
+  const sourceWords = new Set(
+    (original.match(/[A-Za-z][A-Za-z'-]*/g) || []).map((w) => w.toLowerCase()),
+  );
+  const foreignWords = translated.match(/[A-Za-z][A-Za-z'-]{2,}/g) || [];
+  return foreignWords.every((word) => sourceWords.has(word.toLowerCase()));
+}
 export async function runTask(record, capability, settings, args, signal, save, progress) {
   if (
     ![
@@ -84,9 +99,24 @@ export async function runTask(record, capability, settings, args, signal, save, 
     items.every(
       (s) =>
         data.translations.filter(
-          (t) => t?.id === s.id && typeof t.text === 'string' && t.text.trim(),
+          (t) =>
+            t?.id === s.id &&
+            typeof t.text === 'string' &&
+            t.text.trim() &&
+            (!strictTranslation || groundedTranslation(s.rawText, t.text)),
         ).length === 1,
     );
+  const strictTranslation =
+    record.videoInfo.platform === 'migu' &&
+    record.transcriptMeta?.source?.startsWith('whisper') &&
+    /中文|Chinese|zh/i.test(settings.targetLanguage || '简体中文');
+  const validTranslations = (chunk, rows) =>
+    strictTranslation
+      ? rows.filter((row) => {
+          const source = chunk.find((s) => s.id === row?.id);
+          return source && groundedTranslation(source.rawText, row.text);
+        })
+      : rows;
   const request = (input, reusable = () => false) =>
     cachedCompletion(
       settings,
@@ -171,6 +201,7 @@ export async function runTask(record, capability, settings, args, signal, save, 
     settings.models?.[capability] || settings.model,
     settings.targetLanguage,
     settings.prompts?.[capability] || '',
+    ...(capability === 'translation' && strictTranslation ? ['source-only-v2'] : []),
   ]);
   const prior = record.tasks?.[capability];
   if (capability === 'translation') {
@@ -204,7 +235,7 @@ export async function runTask(record, capability, settings, args, signal, save, 
     const pending = record.sentences.filter(
       (s) => wanted.has(s.id) && (args.force || !s.translation),
     );
-    const chunks = batches(pending, 1400),
+    const chunks = batches(pending, strictTranslation ? 500 : 1400),
       errors = [];
     record.translationCaches[signature] ||= {};
     for (const [index, chunk] of chunks.entries()) {
@@ -213,13 +244,11 @@ export async function runTask(record, capability, settings, args, signal, save, 
         const data = await request(
           {
             targetLanguage: settings.targetLanguage,
-            title: record.videoInfo.title,
-            author: record.videoInfo.author,
             items: chunk.map((s) => ({ id: s.id, text: s.rawText })),
           },
           (data) => reusableRows(data, chunk),
         );
-        const aligned = alignTranslations(chunk, data.translations);
+        const aligned = alignTranslations(chunk, validTranslations(chunk, data.translations));
         if (signal.aborted) throw new DOMException('已取消', 'AbortError');
         for (const s of aligned)
           if (s.translation) {
@@ -227,7 +256,7 @@ export async function runTask(record, capability, settings, args, signal, save, 
             record.translationCaches[signature][s.id] = { source: s.rawText, text: s.translation };
           }
         if (aligned.some((s) => !s.translation))
-          throw new Error('本批翻译有漏项，可重试失败部分。');
+          throw new Error('本批译文有漏项或明显偏离原文，未保存有问题的译文。');
       } catch (e) {
         if (signal.aborted) throw e;
         errors.push({ index, error: e.message });
@@ -395,9 +424,13 @@ export async function runTask(record, capability, settings, args, signal, save, 
     try {
       const input = {
         targetLanguage: settings.targetLanguage || '简体中文',
-        title: record.videoInfo.title,
-        author: record.videoInfo.author,
-        description: String(record.videoInfo.description || '').slice(0, 12000),
+        ...(capability === 'translation'
+          ? {}
+          : {
+              title: record.videoInfo.title,
+              author: record.videoInfo.author,
+              description: String(record.videoInfo.description || '').slice(0, 12000),
+            }),
         items: chunk.map((x) => ({ id: x.id, text: x.rawText || x.text })),
       };
       const reusable = (data) =>
@@ -411,10 +444,10 @@ export async function runTask(record, capability, settings, args, signal, save, 
               : false;
       let data = capability === 'analysis' ? null : await request(input, reusable);
       if (capability === 'translation') {
-        const aligned = alignTranslations(chunk, data.translations);
+        const aligned = alignTranslations(chunk, validTranslations(chunk, data.translations));
         record.sentences = record.sentences.map((s) => aligned.find((x) => x.id === s.id) || s);
         if (aligned.some((s) => !s.translation))
-          throw new Error('本批翻译有漏项，可重试失败部分。');
+          throw new Error('本批译文有漏项或明显偏离原文，未保存有问题的译文。');
       }
       if (capability === 'boundary') {
         let result;
