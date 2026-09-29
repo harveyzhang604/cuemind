@@ -1,6 +1,9 @@
 export const FIRST_ASR_SECONDS = 10;
 export const NEXT_ASR_SECONDS = 60;
 
+const isLegacyNoSpeech = (segment) =>
+  segment?.status === 'failed' && /ASR_RESPONSE_HAVE_NO_WORDS/.test(segment.error || '');
+
 // Compare timestamps sampled in the video tab, not when the service worker
 // happens to receive them. A delayed message must not look like a video jump.
 export function captureClockProblem(session, tick, receivedAt = Date.now()) {
@@ -46,10 +49,90 @@ export function planAsrSegments(start, duration, makeId = (index) => `asr-${inde
   return plan;
 }
 
+// The recorder only plans after the playhead. The progress view is different:
+// it must cover the whole video and combine results from every saved session.
+export function buildAsrTimeline(duration, savedSegments = [], currentSessionId = null) {
+  if (!Number.isFinite(duration) || duration <= 0) return [];
+  const priority = {
+    done: 100,
+    translating: 90,
+    'source-ready': 80,
+    'translation-failed': 75,
+    'no-speech': 70,
+    recognizing: 60,
+    queued: 55,
+    capturing: 50,
+    failed: 40,
+    interrupted: 30,
+    pending: 0,
+  };
+  const rows = (Array.isArray(savedSegments) ? savedSegments : [])
+    .filter(
+      (segment) =>
+        segment &&
+        !(
+          segment.status === 'interrupted' &&
+          ['上次识别已中断', '音频尚未播放，可从此位置继续'].includes(segment.error) &&
+          !segment.audioBytes &&
+          !segment.queuedAt &&
+          !segment.recognizingAt
+        ) &&
+        Number.isFinite(segment.start) &&
+        Number.isFinite(segment.end) &&
+        segment.end > segment.start &&
+        segment.end > 0 &&
+        segment.start < duration &&
+        Object.hasOwn(priority, segment.status) &&
+        (segment.status !== 'pending' ||
+          !currentSessionId ||
+          segment.sessionId === currentSessionId),
+    )
+    .map((segment, index) => ({
+      ...segment,
+      // Earlier versions stored the provider's explicit "no words" result as
+      // a failure. It is a completed silent interval, including on resume.
+      status: isLegacyNoSpeech(segment) ? 'no-speech' : segment.status,
+      error: isLegacyNoSpeech(segment) ? '' : segment.error,
+      start: Math.max(0, segment.start),
+      end: Math.min(duration, segment.end),
+      order: index,
+    }));
+  const points = new Set([0, duration]);
+  for (let tick = NEXT_ASR_SECONDS; tick < duration; tick += NEXT_ASR_SECONDS) points.add(tick);
+  for (const segment of rows) {
+    points.add(segment.start);
+    points.add(segment.end);
+  }
+  const sorted = [...points].sort((a, b) => a - b);
+  const timeline = [];
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    const start = sorted[index];
+    const end = sorted[index + 1];
+    if (end - start < 0.01) continue;
+    const owner = rows
+      .filter((segment) => segment.start <= start + 0.01 && segment.end >= end - 0.01)
+      .sort((a, b) => priority[b.status] - priority[a.status] || b.order - a.order)[0];
+    const segment = owner || { status: 'pending' };
+    const previous = timeline.at(-1);
+    // Keep saved capture boundaries intact, including across a minute tick.
+    if (owner && previous?.id === owner.id && previous.status === owner.status) {
+      previous.end = end;
+    } else {
+      timeline.push({
+        ...segment,
+        id: owner?.id || `unstarted-${start}`,
+        start,
+        end,
+      });
+    }
+  }
+  return timeline;
+}
+
 const hasOriginal = (segment) =>
   ['source-ready', 'translating', 'done', 'translation-failed', 'no-speech'].includes(
     segment?.status,
-  );
+  ) || isLegacyNoSpeech(segment);
 
 // A failed ASR segment is a gap, even if a later segment completed. Never
 // jump over that gap when the user asks to continue from its time range.

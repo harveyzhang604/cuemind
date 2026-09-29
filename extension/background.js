@@ -981,13 +981,23 @@ async function route(m) {
       }
       record.transcriptMeta.asrSegments = [
         ...(Array.isArray(original.transcriptMeta.asrSegments)
-          ? original.transcriptMeta.asrSegments.map((segment) =>
-              ['pending', 'capturing', 'queued', 'recognizing', 'translating'].includes(
-                segment.status,
+          ? original.transcriptMeta.asrSegments
+              .filter(
+                (segment) =>
+                  segment.status !== 'pending' &&
+                  !(
+                    segment.status === 'interrupted' &&
+                    ['上次识别已中断', '音频尚未播放，可从此位置继续'].includes(segment.error) &&
+                    !segment.audioBytes &&
+                    !segment.queuedAt &&
+                    !segment.recognizingAt
+                  ),
               )
-                ? { ...segment, status: 'interrupted', error: '上次识别已中断' }
-                : segment,
-            )
+              .map((segment) =>
+                ['capturing', 'queued', 'recognizing', 'translating'].includes(segment.status)
+                  ? { ...segment, status: 'interrupted', error: '上次识别已中断' }
+                  : segment,
+              )
           : []),
         ...session.plan,
       ];
@@ -1318,7 +1328,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
             id: crypto.randomUUID(),
             start: capturedEnd,
             end: plannedEnd,
-            status: 'interrupted',
+            status: 'pending',
             error: '音频尚未播放，可从此位置继续',
           });
         }

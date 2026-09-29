@@ -296,7 +296,7 @@ test('rolling ASR saves each source segment, translates it, and keeps earlier bi
  assert.deepEqual(Array.from(saved.sentences,s=>s.translation),['中：Hello.','中：How are you?']);
  assert.equal(saved.transcriptMeta.asrSegments[1].status,'done');
  assert.equal(saved.transcriptMeta.asrSegments[1].end,60);
- assert.equal(saved.transcriptMeta.asrSegments[2].status,'interrupted');
+ assert.equal(saved.transcriptMeta.asrSegments[2].status,'pending');
  assert.equal(saved.transcriptMeta.asrSegments[2].start,60);
  assert.equal(saved.transcriptMeta.asrSegments[2].end,70);
  assert.deepEqual(calls.map(ids=>ids.length),[1,1],'previous bilingual lines must not be sent again');

@@ -14,6 +14,7 @@ import { markdown, mindmap, outline, subtitles } from '../core/export.js';
 import { demoRecord } from './demo.js';
 import { prepareSpeechAudio, speechSettings } from '../services/speech.js';
 import { keyFromUrl, matchesVideoUrl } from '../core/video.js';
+import { buildAsrTimeline } from '../core/asr-progress.js';
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const ext = !!globalThis.chrome?.runtime?.id;
@@ -2485,11 +2486,11 @@ function refreshAsrElapsed() {
       ['recognizing', 'queued'].includes(segment.status),
   );
   for (const segment of active) {
-    const row = [...$('#asr-segment-list').children].find(
-      (entry) => entry.dataset.segmentId === segment.id,
-    );
-    const value = row?.querySelector('strong');
-    if (value) value.textContent = asrStatusText(segment);
+    for (const row of $('#asr-segment-list').children) {
+      if (row.dataset.segmentId !== segment.id) continue;
+      const value = row.querySelector('strong');
+      if (value) value.textContent = asrStatusText(segment);
+    }
   }
   const last = all.findLast(
     (segment) =>
@@ -2503,19 +2504,23 @@ function refreshAsrElapsed() {
 function renderAsrSegments() {
   const all = record?.transcriptMeta.asrSegments || [];
   const sessionId = record?.transcriptMeta.asrSessionId;
+  $('#asr-progress').hidden = !all.length;
+  if (!all.length) return;
+  const duration =
+    Number(record?.videoInfo?.duration) ||
+    all.reduce((latest, segment) => Math.max(latest, Number(segment.end) || 0), 0);
+  const timeline = buildAsrTimeline(duration, all, sessionId);
   const segments = sessionId ? all.filter((segment) => segment.sessionId === sessionId) : all;
-  $('#asr-progress').hidden = !segments.length;
-  if (!segments.length) return;
-  const originalReady = segments.filter((segment) =>
+  const originalReady = timeline.filter((segment) =>
     ['source-ready', 'translating', 'done', 'translation-failed'].includes(segment.status),
   ).length;
-  const silent = segments.filter((segment) => segment.status === 'no-speech').length;
-  const bilingual = segments.filter((segment) => segment.status === 'done').length;
-  const failed = segments.filter((segment) =>
+  const silent = timeline.filter((segment) => segment.status === 'no-speech').length;
+  const bilingual = timeline.filter((segment) => segment.status === 'done').length;
+  const failed = timeline.filter((segment) =>
     ['failed', 'translation-failed', 'interrupted'].includes(segment.status),
   ).length;
   $('#asr-plan-summary').textContent =
-    `计划 ${segments.length} 段 · 原文成功 ${originalReady}${silent ? ` · 无语音 ${silent}` : ''} · 双语完成 ${bilingual} · 失败 ${failed}`;
+    `全片 ${formatTime(duration)} · ${timeline.length} 段 · 原文成功 ${originalReady}${silent ? ` · 无语音 ${silent}` : ''} · 双语完成 ${bilingual} · 失败 ${failed}`;
   const activeSegment = segments.findLast((segment) =>
     ['capturing', 'queued', 'recognizing', 'translating'].includes(segment.status),
   );
@@ -2535,7 +2540,7 @@ function renderAsrSegments() {
     : '';
   const list = $('#asr-segment-list');
   list.replaceChildren();
-  for (const [index, segment] of segments.entries()) {
+  for (const [index, segment] of timeline.entries()) {
     const row = el('div', 'asr-segment');
     row.dataset.status = segment.status;
     row.dataset.segmentId = segment.id;

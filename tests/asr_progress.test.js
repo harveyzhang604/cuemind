@@ -1,10 +1,75 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildAsrTimeline,
   captureClockProblem,
   planAsrSegments,
   skipRecognizedAudio,
 } from '../extension/core/asr-progress.js';
+
+test('ASR progress covers the whole video and retains earlier session results', () => {
+  const timeline = buildAsrTimeline(
+    240,
+    [
+      { id: 'earlier', sessionId: 'old', start: 30, end: 90, status: 'done' },
+      { id: 'old-failure', sessionId: 'old', start: 90, end: 120, status: 'failed' },
+      { id: 'later', sessionId: 'new', start: 130, end: 140, status: 'no-speech' },
+      { id: 'retry', sessionId: 'new', start: 30, end: 90, status: 'pending' },
+      { id: 'future', sessionId: 'new', start: 140, end: 200, status: 'pending' },
+    ],
+    'new',
+  );
+  assert.equal(timeline[0].start, 0);
+  assert.equal(timeline.at(-1).end, 240);
+  assert.deepEqual(
+    timeline.filter((segment) => segment.status === 'done').map(({ start, end }) => [start, end]),
+    [[30, 90]],
+  );
+  assert.deepEqual(
+    timeline.filter((segment) => segment.status === 'no-speech').map(({ start, end }) => [start, end]),
+    [[130, 140]],
+  );
+  assert.equal(timeline.find((segment) => segment.start === 90).status, 'failed');
+  assert.equal(timeline.find((segment) => segment.start === 0).status, 'pending');
+  assert.ok(timeline.some((segment) => segment.start === 200 && segment.status === 'pending'));
+  for (let index = 1; index < timeline.length; index += 1)
+    assert.equal(timeline[index - 1].end, timeline[index].start);
+});
+
+test('a later successful retry replaces an old failure in the timeline', () => {
+  const timeline = buildAsrTimeline(120, [
+    { id: 'failed', start: 60, end: 80, status: 'failed' },
+    { id: 'success', start: 60, end: 80, status: 'done' },
+  ]);
+  assert.equal(timeline.find((segment) => segment.start === 60).status, 'done');
+  assert.ok(!timeline.some((segment) => segment.status === 'failed'));
+});
+
+test('legacy unplayed plans are shown as unstarted rather than failed', () => {
+  const timeline = buildAsrTimeline(180, [
+    { id: 'old-plan', start: 0, end: 60, status: 'interrupted', error: '上次识别已中断' },
+    { id: 'tail', start: 60, end: 70, status: 'interrupted', error: '音频尚未播放，可从此位置继续' },
+    { id: 'real-error', start: 70, end: 80, status: 'failed', error: 'ASR unavailable' },
+    { id: 'saved', start: 80, end: 140, status: 'done' },
+  ]);
+  assert.ok(timeline.some((segment) => segment.start === 0 && segment.status === 'pending'));
+  assert.ok(timeline.some((segment) => segment.start === 60 && segment.status === 'pending'));
+  assert.equal(timeline.filter((segment) => segment.status === 'failed').length, 1);
+  assert.ok(timeline.some((segment) => segment.start === 80 && segment.status === 'done'));
+});
+
+test('legacy provider no-words responses count as completed silence on resume', () => {
+  const silent = {
+    id: 'no-words',
+    start: 10,
+    end: 20,
+    status: 'failed',
+    error: 'HTTP 400: ASR_RESPONSE_HAVE_NO_WORDS',
+  };
+  const timeline = buildAsrTimeline(60, [silent]);
+  assert.equal(timeline.find((segment) => segment.start === 10).status, 'no-speech');
+  assert.ok(skipRecognizedAudio(11, [silent]) > 20);
+});
 
 test('ASR plans a ten-second first segment and rolling one-minute segments only after the playhead', () => {
   const plan = planAsrSegments(7200, 7505);
