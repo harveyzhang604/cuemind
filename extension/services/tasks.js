@@ -30,6 +30,26 @@ export function groundedTranslation(source, target) {
   const foreignWords = translated.match(/[A-Za-z][A-Za-z'-]{2,}/g) || [];
   return foreignWords.every((word) => sourceWords.has(word.toLowerCase()));
 }
+// ASR can return a whole paragraph as one timestamped line. When the model
+// repeatedly fails that line, translate its clauses separately but keep the
+// original sentence ID and timing in the saved transcript.
+export function translationParts(source, maxChars = 150) {
+  const clauses = String(source || '').match(/[^.!?。！？]+[.!?。！？]*\s*/g) || [source];
+  const parts = [];
+  for (const clause of clauses) {
+    const words = clause.trim().split(/\s+/).filter(Boolean);
+    let part = '';
+    for (const word of words) {
+      if (part && `${part} ${word}`.length > maxChars) {
+        parts.push(part);
+        part = '';
+      }
+      part = part ? `${part} ${word}` : word;
+    }
+    if (part) parts.push(part);
+  }
+  return parts;
+}
 export async function runTask(record, capability, settings, args, signal, save, progress) {
   if (
     ![
@@ -154,6 +174,38 @@ export async function runTask(record, capability, settings, args, signal, save, 
         if (fixed.translation) aligned[index] = fixed;
       } catch (error) {
         if (signal.aborted) throw error;
+      }
+      if (aligned[index].translation || sentence.rawText.length < 180) continue;
+      const parts = translationParts(sentence.rawText);
+      if (parts.length < 2) continue;
+      const translated = [];
+      for (const [partIndex, part] of parts.entries()) {
+        if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+        const item = { id: `${sentence.id}:part:${partIndex}`, rawText: part };
+        try {
+          const result = await request(
+            {
+              targetLanguage: settings.targetLanguage,
+              items: [{ id: item.id, text: part }],
+              repair: '只翻译这一小段原文，不补充上下文。',
+            },
+            (response) => reusableRows(response, [item]),
+          );
+          const [fixed] = alignTranslations(
+            [item],
+            validTranslations([item], result?.translations || []),
+          );
+          if (!fixed.translation) break;
+          translated.push(fixed.translation);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          break;
+        }
+      }
+      if (translated.length === parts.length) {
+        const joined = translated.join(' ');
+        if (groundedTranslation(sentence.rawText, joined))
+          aligned[index] = { ...sentence, translation: joined };
       }
     }
     return aligned;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {cachedCompletion,completionCacheKey} from '../extension/services/completion-cache.js';
-import {runTask,groundedTranslation} from '../extension/services/tasks.js';
+import {runTask,groundedTranslation,translationParts} from '../extension/services/tasks.js';
 const signal=()=>new AbortController().signal;
 function memory(){const rows=new Map();return {rows,get:async id=>structuredClone(rows.get(id)),put:async row=>rows.set(row.id,structuredClone(row)),remove:async id=>rows.delete(id)};}
 test('validated completion persists, excludes credentials, invalidates on real input changes and skips failures',async()=>{
@@ -75,5 +75,26 @@ test('automatic Migu translation repairs an omitted line alone and uses short ba
   assert.ok(requests.some(input=>input.repair&&input.items.length===1&&input.items[0].id==='s0'));
   assert.ok(requests.filter(input=>!input.repair).length>1);
   assert.ok(requests.filter(input=>!input.repair).every(input=>input.items.length<=4));
+ }finally{global.fetch=previous;}
+});
+test('long ASR paragraph falls back to clause translations while retaining its sentence timing',async()=>{
+ const previous=global.fetch,inputs=[];
+ const rawText='All right, with that, I am John Anik. Welcome to UFC 331. The first meeting ended just 26 seconds in, and many wondered what might have happened. He became the world champion at 24 years of age.';
+ const parts=translationParts(rawText);
+ assert.ok(parts.length>=3);
+ global.fetch=async(_url,init)=>{
+  const input=JSON.parse(JSON.parse(init.body).messages.at(-1).content);
+  inputs.push(input);
+  const translations=input.items.map(item=>({id:item.id,text:item.id.includes(':part:')?'这是对应的小段译文。':'2027 年无关赛事介绍。'}));
+  return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({translations})}}]}));
+ };
+ const record={videoInfo:{platform:'migu',title:'UFC'},transcriptMeta:{source:'whisper'},sentences:[{id:'long',start:274,end:295,rawText}]};
+ try{
+  const result=await runTask(record,'translation',{apiKey:'fixture',targetLanguage:'简体中文'},{},signal(),async()=>{},()=>{});
+  assert.equal(result.partial,false);
+  assert.equal(record.sentences[0].start,274);
+  assert.equal(record.sentences[0].end,295);
+  assert.equal(record.sentences[0].translation,parts.map(()=> '这是对应的小段译文。').join(' '));
+  assert.equal(inputs.filter(input=>input.items[0].id.includes(':part:')).length,parts.length);
  }finally{global.fetch=previous;}
 });
