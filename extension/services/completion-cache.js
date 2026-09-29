@@ -1,5 +1,5 @@
 import { completion, transcribe, defaults } from './ai-provider.js';
-import { isDoubaoAsr } from './speech.js';
+import { isDoubaoAsr, isQwenAsr } from './speech.js';
 import * as db from '../storage/db.js';
 
 export async function completionCacheKey(settings, system, input, capability) {
@@ -82,7 +82,7 @@ export async function cachedTranscribe(blob, settings, signal, filename, options
   if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
   if (
     Array.isArray(saved?.data) &&
-    (saved.data.length || isDoubaoAsr(cfg.asrUrl)) &&
+    (saved.data.length || isDoubaoAsr(cfg) || isQwenAsr(cfg)) &&
     saved.data.every(
       (s) =>
         typeof s?.text === 'string' &&

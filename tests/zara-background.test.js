@@ -216,7 +216,7 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  f.context.chrome.runtime.sendMessage = async m => {if(m.type==='START')speechConfig=m.settings;return {ok:true,data:m.type==='EVENT'?null:true};};
  const next = await f.route({type:'CAPTURE_START',recordId:prior.id,tabId:1});
  assert.equal(speechConfig.asrKey,'fixture-domestic');
- assert.equal(speechConfig.asrModel,'volc.bigasr.auc_turbo');
+ assert.equal(speechConfig.asrModel,'qwen-audio-3.1-asr-flash');
  assert.ok(seeks[0]>=70&&seeks[0]<71,'the saved minute must not be recognized again');
  assert.equal(next.transcriptMeta.asrSegments[0].start,seeks[0]);
  assert.equal(next.transcriptMeta.asrSegments[0].end,seeks[0]+10);

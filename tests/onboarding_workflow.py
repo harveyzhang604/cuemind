@@ -34,7 +34,7 @@ with preview_server() as base,sync_playwright() as p:
  assert not errors,errors
  settings=b.new_page();settings.goto(base+'/extension/panel/settings.html');expect(settings.locator('#asr-provider')).to_have_value('openai');settings.locator('#asrKey').fill('OLD-FIXTURE');settings.locator('#asr-provider').select_option('groq');expect(settings.locator('#asrUrl')).to_have_value('https://api.groq.com/openai/v1');expect(settings.locator('#asrModel')).to_have_value('whisper-large-v3-turbo');expect(settings.locator('#asrKey')).to_have_value('');settings.locator('#asrUrl').fill('https://custom.example/v1');expect(settings.locator('#asr-provider')).to_have_value('custom')
  settings.locator('#asrRouting').select_option('platform');expect(settings.locator('#domestic-asr-settings')).to_be_visible()
- expect(settings.locator('#domestic-asr-provider')).to_have_value('doubao')
+ expect(settings.locator('#domestic-asr-provider')).to_have_value('qwen31')
  settings.locator('#asrKey').fill('OVERSEAS-FIXTURE');settings.locator('#domesticAsrKey').fill('DOMESTIC-FIXTURE')
  settings.locator('#domestic-asr-provider').select_option('custom');settings.locator('#domesticAsrUrl').fill('https://domestic.example/v1')
  settings.locator('#domestic-asr-provider').select_option('doubao');expect(settings.locator('#domesticAsrKey')).to_have_value('');expect(settings.locator('#asrKey')).to_have_value('OVERSEAS-FIXTURE')

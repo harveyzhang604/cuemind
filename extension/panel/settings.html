@@ -116,7 +116,7 @@
           >
           <h3 id="asr-shared-title">通用 / YouTube 语音服务</h3>
           <p class="hint">
-            支持豆包语音及带时间戳 verbose_json 的 Whisper-compatible
+            支持阿里千问同步 Flash、豆包语音及带时间戳 verbose_json 的 Whisper-compatible
             接口。扩展只采集当前标签页播放的音频，按 1× 实时播放以对齐时间戳；首段约 10
             秒，后续每段约 1
             分钟，随播放进度持续识别。每段状态和失败原因会显示在字幕侧栏；结束采集后会处理剩余音频。也可上传
@@ -124,6 +124,8 @@
           </p>
           <label
             >语音服务商<select id="asr-provider">
+              <option value="qwen31">阿里千问 3.1 同步 Flash</option>
+              <option value="qwen30">阿里千问 3.0 同步 Flash</option>
               <option value="groq">Groq</option>
               <option value="openai">OpenAI</option>
               <option value="doubao">豆包语音 · 火山引擎（国内）</option>
@@ -156,6 +158,11 @@
               rel="noopener noreferrer"
               >获取 OpenAI API Key ↗</a
             >，或<a
+              href="https://help.aliyun.com/zh/model-studio/get-api-key"
+              target="_blank"
+              rel="noopener noreferrer"
+              >获取阿里云百炼 API Key ↗</a
+            >，或<a
               href="https://console.volcengine.com/speech/app"
               target="_blank"
               rel="noopener noreferrer"
@@ -167,11 +174,14 @@
           <div id="domestic-asr-settings" hidden>
             <h3>咪咕 / B 站语音服务</h3>
             <p class="hint">
-              选择在视频正常播放时也能访问的服务。豆包语音使用独立的新版控制台 API
-              Key，需开通录音文件识别极速版；也可填写国内部署的兼容接口。扩展不会改变系统代理。
+              选择在视频正常播放时也能访问的服务。千问同步 Flash 直接接收本机采集的音频；推荐 3.1
+              版以获取完整分句时间戳。3.0 版缺少完整句子时会提示失败，不会保存残缺字幕。 filetrans
+              系列需要公网音频地址及异步任务，不适用于这里的直接上传流程。扩展不会改变系统代理。
             </p>
             <label
               >国内语音供应商<select id="domestic-asr-provider">
+                <option value="qwen31">阿里千问 3.1 同步 Flash（推荐）</option>
+                <option value="qwen30">阿里千问 3.0 同步 Flash</option>
                 <option value="doubao">豆包语音 · 火山引擎</option>
                 <option value="custom">自定义 Whisper 兼容服务</option>
               </select></label
@@ -184,6 +194,12 @@
               /></label>
             </div>
             <p class="hint">
+              <a
+                href="https://help.aliyun.com/zh/model-studio/get-api-key"
+                target="_blank"
+                rel="noopener noreferrer"
+                >获取阿里云百炼 API Key ↗</a
+              >，或
               <a
                 href="https://console.volcengine.com/speech/app"
                 target="_blank"

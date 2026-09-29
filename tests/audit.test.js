@@ -84,12 +84,12 @@ test('only supported video URLs produce platform keys',()=>{
   for(const url of ['https://evil.invalid/watch?v=a','https://www.bilibili.com/video/BV123?p=-1','javascript:alert(1)'])assert.equal(keyFromUrl(url),null);
 });
 test('domestic and overseas speech routes isolate keys and backups reject substituted credentials',async()=>{
-  const {speechSettings,DOUBAO_ASR_URL}=await import('../extension/services/speech.js');
+  const {speechSettings,QWEN_ASR_URL}=await import('../extension/services/speech.js');
   const cfg=validateSettings({asrRouting:'platform',asrKey:'overseas-fixture',domesticAsrKey:'domestic-fixture'});
   assert.equal(speechSettings(cfg,'youtube').asrKey,'overseas-fixture');
   for(const platform of ['migu','bilibili']) {
     assert.equal(speechSettings(cfg,platform).asrKey,'domestic-fixture');
-    assert.equal(speechSettings(cfg,platform).asrUrl,DOUBAO_ASR_URL);
+    assert.equal(speechSettings(cfg,platform).asrUrl,QWEN_ASR_URL);
   }
   assert.equal(speechSettings({...cfg,domesticAsrKey:''},'migu').asrKey,'');
   assert.equal(restoreSettings({...cfg,domesticAsrKey:'forged'},cfg).domesticAsrKey,'domestic-fixture');
@@ -115,6 +115,50 @@ test('Doubao uploads WAV with independent credentials and converts millisecond u
     status='20000003';assert.deepEqual(await transcribe(audio,cfg),[]);
     status='45000151';await assert.rejects(()=>transcribe(audio,cfg),/音频格式/);
   } finally {global.fetch=previous;}
+});
+test('Qwen synchronous Flash uploads local WAV and preserves complete sentence timestamps',async()=>{
+  const {QWEN_ASR_URL,pcmWave}=await import('../extension/services/speech.js');
+  const previous=global.fetch;let sent;
+  const audio=pcmWave(new Float32Array([0,-1,1]));
+  global.fetch=async(url,options)=>{
+    sent={url,...options};
+    return new Response(JSON.stringify({output:{text:'Hello. World.',sentences:[
+      {sentence_id:1,sentence_end:true,begin_time:100,end_time:800,text:'Hello.'},
+      {sentence_id:2,sentence_end:true,begin_time:900,end_time:1600,text:'World.'},
+    ]}}));
+  };
+  try {
+    const cfg={asrUrl:QWEN_ASR_URL,asrModel:'qwen-audio-3.1-asr-flash',asrKey:'qwen-fixture',apiKey:'text-fixture'};
+    assert.deepEqual(await transcribe(audio,cfg),[
+      {start:.1,end:.8,text:'Hello.'},{start:.9,end:1.6,text:'World.'},
+    ]);
+    assert.match(sent.url,/dashscope\.aliyuncs\.com\/api\/v1\/services\/aigc\/multimodal-generation\/generation$/);
+    assert.equal(sent.headers.Authorization,'Bearer qwen-fixture');
+    assert.equal(sent.headers['X-DashScope-SSE'],'disable');
+    const body=JSON.parse(sent.body);
+    assert.equal(body.model,'qwen-audio-3.1-asr-flash');
+    assert.equal(body.parameters.speaker_diarization_enabled,true);
+    assert.ok(body.input.messages[0].content[0].input_audio.data.startsWith('data:audio/wav;base64,'));
+    assert.ok(!sent.body.includes('text-fixture'));
+    global.fetch=async()=>new Response(JSON.stringify({output:{text:'Hello. World.',sentence:{sentence_end:true,begin_time:900,end_time:1600,text:'World.'}}}));
+    await assert.rejects(()=>transcribe(audio,cfg),/只返回了部分句子/);
+    global.fetch=async()=>new Response(JSON.stringify({output:{text:'',sentences:[]}}));
+    assert.deepEqual(await transcribe(audio,cfg),[]);
+    global.fetch=async()=>new Response(JSON.stringify({output:{}}));
+    await assert.rejects(()=>transcribe(audio,cfg),/只返回了部分句子/);
+    await assert.rejects(()=>transcribe(audio,{...cfg,asrModel:'qwen-audio-3.0-asr-flash-filetrans'}),/filetrans 模型需要异步/);
+  } finally {global.fetch=previous;}
+});
+test('Qwen 3.0 SSE accumulates completed sentences without saving a partial result',async()=>{
+  const {parseQwenResponse,qwenSegments}=await import('../extension/services/speech.js');
+  const raw=[
+    {output:{text:'Hello.',sentence:{sentence_id:1,sentence_end:true,begin_time:0,end_time:500,text:'Hello.'}}},
+    {output:{text:'Hello. World.',sentence:{sentence_id:2,sentence_end:true,begin_time:600,end_time:1200,text:'World.'}}},
+  ].map((event)=>`data:${JSON.stringify(event)}\n\n`).join('');
+  assert.deepEqual(qwenSegments(parseQwenResponse(raw,'text/event-stream')),[
+    {start:0,end:.5,text:'Hello.'},{start:.6,end:1.2,text:'World.'},
+  ]);
+  assert.throws(()=>qwenSegments(parseQwenResponse(raw.split('\n\n')[1],'text/event-stream')),/部分句子/);
 });
 test('speech network check sends neither keys nor audio and accepts method-not-allowed as reachable',async()=>{
   const {checkSpeechNetwork}=await import('../extension/services/speech.js');

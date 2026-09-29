@@ -46,6 +46,7 @@ test('offscreen recorder advances from a 10-second segment to the next one-minut
   const context = {
     AbortController,
     prepareSpeechAudio: async (blob) => blob,
+    isQwenAsr: () => false,
     AudioContext: Audio,
     Blob,
     MediaRecorder: Recorder,
@@ -170,6 +171,7 @@ test('a timed-out ASR chunk fails once, stops capture, and preserves a retryable
   const context = {
     AbortController,
     prepareSpeechAudio: async (blob) => blob,
+    isQwenAsr: () => false,
     AudioContext: Audio,
     Blob,
     MediaRecorder: Recorder,

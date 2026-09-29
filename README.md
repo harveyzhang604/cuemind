@@ -104,9 +104,9 @@ Supadata Key 与文本模型 Key 独立。CueMind 只向它请求视频已有字
 <details>
 <summary>可选：无字幕视频的音频转写</summary>
 
-到设置中的语音服务部分选择供应商并填写独立 ASR Key，支持 Groq、OpenAI、豆包语音与带时间戳的 Whisper-compatible 接口。选择“按平台选择”后，YouTube 使用海外配置，咪咕/B站使用国内配置。两套地址、模型及 Key 分别保存在本机，运行时自动选择；翻译仍使用文本模型（如 DeepSeek）。旧配置默认保持共用，需主动启用按平台选择。
+到设置中的语音服务部分选择供应商并填写独立 ASR Key，支持阿里千问同步 Flash、Groq、OpenAI、豆包语音与带时间戳的 Whisper-compatible 接口。选择“按平台选择”后，YouTube 使用海外配置，咪咕/B站使用国内配置。两套地址、模型及 Key 分别保存在本机，运行时自动选择；翻译仍使用文本模型（如 DeepSeek）。旧配置默认保持共用，需主动启用按平台选择。
 
-国内可选[豆包语音](https://console.volcengine.com/speech/app)，开通录音文件识别极速版并填写新版控制台 API Key。扩展会在本机把浏览器音频转为 WAV，并使用服务返回的分句时间戳；也可使用自己的国内 Whisper 兼容服务。海外 Groq Key 可在 [Groq 控制台](https://console.groq.com/keys)创建。设置页的连接检查不发送 Key 或音频，只验证服务能否连通；实际识别还需要有效 Key、权限和额度。扩展不修改系统代理，所选视频与 ASR 服务需在当前网络下同时可访问。
+国内预设为[阿里千问 3.1 同步 Flash](https://help.aliyun.com/zh/model-studio/fun-asr-flash-recorded-speech-recognition-http-api)：音频在本机转为单声道 16 kHz WAV，再以 Base64 直接发送，使用完整分句时间戳生成字幕。也可选择 3.0 同步 Flash，但若返回的时间戳只覆盖部分识别文本，该段会报错而不会保存残缺字幕。`qwen-audio-3.0-asr-flash-filetrans` 属于异步文件任务，要求公网可访问的音频 URL，不能替代直接上传；用户也可选择[豆包语音](https://console.volcengine.com/speech/app)或自己的国内 Whisper 兼容服务。海外 Groq Key 可在 [Groq 控制台](https://console.groq.com/keys)创建。设置页的连接检查不发送 Key 或音频，只验证服务能否连通；实际识别还需要有效 Key、权限和额度。扩展不修改系统代理，所选视频与 ASR 服务需在当前网络下同时可访问。
 
 随后在字幕工具栏点击 **⋯ → 导入字幕与音频**，选择导入 SRT/VTT、上传音频，或点击 **识别当前视频音频**。扩展只提取正在播放的音频并发送到配置的转写服务，不保存视频画面；需要按 1× 实时播放来对齐时间戳。识别由你主动开始，服务可能收费。侧栏会按首段约 10 秒、后续每段约 1 分钟显示视频剩余部分的计划、排队与等待时间和每段结果，并显示音频大小及电平，方便区分采集问题与语音服务问题。语音服务超时后会停止继续采集；已完成的字幕仍保存在本机，可以从失败区间重试。
 

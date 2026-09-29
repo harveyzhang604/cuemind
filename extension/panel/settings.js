@@ -1,7 +1,13 @@
 import { prompts } from '../services/prompts.js';
 import { promptExamples, defaultDescriptions } from './prompt-examples.js';
 import { defaults, endpoint } from '../services/ai-provider.js';
-import { DOUBAO_ASR_URL, DOUBAO_ASR_RESOURCE, checkSpeechNetwork } from '../services/speech.js';
+import {
+  DOUBAO_ASR_URL,
+  DOUBAO_ASR_RESOURCE,
+  QWEN_ASR_URL,
+  QWEN_ASR_MODEL,
+  checkSpeechNetwork,
+} from '../services/speech.js';
 const $ = (s) => document.querySelector(s);
 const ext = !!globalThis.chrome?.runtime?.id;
 const capabilities = {
@@ -225,6 +231,8 @@ function updateModelKeyHelp() {
 updateModelKeyHelp();
 $('#baseUrl').addEventListener('input', updateModelKeyHelp);
 const asrPresets = {
+  qwen31: [QWEN_ASR_URL, QWEN_ASR_MODEL],
+  qwen30: [QWEN_ASR_URL, 'qwen-audio-3.0-asr-flash'],
   doubao: [DOUBAO_ASR_URL, DOUBAO_ASR_RESOURCE],
   groq: ['https://api.groq.com/openai/v1', 'whisper-large-v3-turbo'],
   openai: ['https://api.openai.com/v1', 'whisper-1'],
@@ -258,18 +266,24 @@ function showSpeechRouting() {
 $('#asrRouting').onchange = showSpeechRouting;
 showSpeechRouting();
 function detectDomesticProvider() {
-  $('#domestic-asr-provider').value =
-    $('#domesticAsrUrl').value.replace(/\/$/, '') === DOUBAO_ASR_URL ? 'doubao' : 'custom';
+  const entry = Object.entries(asrPresets).find(
+    ([name, preset]) =>
+      ['qwen31', 'qwen30', 'doubao'].includes(name) &&
+      $('#domesticAsrUrl').value.replace(/\/$/, '') === preset[0] &&
+      $('#domesticAsrModel').value === preset[1],
+  );
+  $('#domestic-asr-provider').value = entry?.[0] || 'custom';
 }
 detectDomesticProvider();
 $('#domestic-asr-provider').onchange = () => {
-  if ($('#domestic-asr-provider').value !== 'doubao') return;
-  if ($('#domesticAsrUrl').value.replace(/\/$/, '') !== DOUBAO_ASR_URL)
-    $('#domesticAsrKey').value = '';
-  $('#domesticAsrUrl').value = DOUBAO_ASR_URL;
-  $('#domesticAsrModel').value = DOUBAO_ASR_RESOURCE;
+  const preset = asrPresets[$('#domestic-asr-provider').value];
+  if (!preset) return;
+  if ($('#domesticAsrUrl').value.replace(/\/$/, '') !== preset[0]) $('#domesticAsrKey').value = '';
+  $('#domesticAsrUrl').value = preset[0];
+  $('#domesticAsrModel').value = preset[1];
 };
-$('#domesticAsrUrl').addEventListener('input', detectDomesticProvider);
+for (const id of ['domesticAsrUrl', 'domesticAsrModel'])
+  $('#' + id).addEventListener('input', detectDomesticProvider);
 for (const [button, output, field] of [
   ['test-asr-network', 'asr-network-status', 'asrUrl'],
   ['test-domestic-asr-network', 'domestic-asr-network-status', 'domesticAsrUrl'],

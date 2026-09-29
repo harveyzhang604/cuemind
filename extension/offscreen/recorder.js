@@ -1,5 +1,5 @@
 import { cachedTranscribe as transcribe } from '../services/completion-cache.js';
-import { prepareSpeechAudio } from '../services/speech.js';
+import { isQwenAsr, prepareSpeechAudio } from '../services/speech.js';
 
 let state = null;
 const send = (message) => chrome.runtime.sendMessage(message);
@@ -119,10 +119,9 @@ async function recordChunk(s) {
               segment.end,
               Math.max(offset + 0.1, Number(endState?.time) || segment.end),
             );
-            const timeoutMs = Math.min(
-              75000,
-              Math.max(45000, Math.round((segment.end - offset) * 1250)),
-            );
+            const timeoutMs = isQwenAsr(s.settings)
+              ? Math.min(120000, Math.max(60000, Math.round((segment.end - offset) * 2000)))
+              : Math.min(75000, Math.max(45000, Math.round((segment.end - offset) * 1250)));
             await send({
               type: 'ASR_PROGRESS',
               recordId: s.recordId,

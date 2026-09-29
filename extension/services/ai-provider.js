@@ -1,10 +1,14 @@
 import {
-  DOUBAO_ASR_URL,
-  DOUBAO_ASR_RESOURCE,
+  QWEN_ASR_URL,
+  QWEN_ASR_MODEL,
   isDoubaoAsr,
+  isQwenAsr,
   speechUrl,
   doubaoRequest,
   doubaoSegments,
+  qwenRequest,
+  qwenSegments,
+  parseQwenResponse,
 } from './speech.js';
 export const defaults = {
   provider: 'openai',
@@ -20,8 +24,8 @@ export const defaults = {
   asrModel: 'whisper-1',
   asrKey: '',
   asrRouting: 'shared',
-  domesticAsrUrl: DOUBAO_ASR_URL,
-  domesticAsrModel: DOUBAO_ASR_RESOURCE,
+  domesticAsrUrl: QWEN_ASR_URL,
+  domesticAsrModel: QWEN_ASR_MODEL,
   domesticAsrKey: '',
   transcriptProvider: 'platform',
   supadataApiKey: '',
@@ -186,9 +190,12 @@ export async function transcribe(blob, settings, signal, filename, options = {})
   form.append('response_format', 'verbose_json');
   form.append('timestamp_granularities[]', 'segment');
   const doubao = isDoubaoAsr(s);
+  const qwen = isQwenAsr(s);
   const request = doubao
     ? await doubaoRequest(blob, s)
-    : { headers: { Authorization: `Bearer ${s.asrKey}` }, body: form };
+    : qwen
+      ? await qwenRequest(blob, s)
+      : { headers: { Authorization: `Bearer ${s.asrKey}` }, body: form };
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
@@ -218,8 +225,17 @@ export async function transcribe(blob, settings, signal, filename, options = {})
       if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
       return [];
     }
-    const data = JSON.parse(await limitedText(response, 5_000_000));
+    const raw = await limitedText(response, 5_000_000);
+    const data = qwen
+      ? parseQwenResponse(raw, response.headers.get('Content-Type') || '')
+      : JSON.parse(raw);
     if (doubao) data.segments = doubaoSegments(data, response.headers.get('X-Api-Status-Code'));
+    if (qwen) {
+      const segments = qwenSegments(data);
+      if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
+      if (!segments.length) return [];
+      return segments;
+    }
     if (
       !Array.isArray(data.segments) ||
       !data.segments.length ||
