@@ -243,3 +243,128 @@ test('a timed-out ASR chunk fails once, stops capture, and preserves a retryable
   assert.equal(messages.at(-1).type, 'ASR_FINISHED');
   assert.match(messages.at(-1).error, /45 秒/);
 });
+
+test('a silent chunk is saved as no speech without calling ASR or stopping later chunks', async () => {
+  const source = (
+    await readFile(new URL('../extension/offscreen/recorder.js', import.meta.url), 'utf8')
+  ).replace(/^import [^\n]+\n/gm, '');
+  const messages = [],
+    timers = new Map();
+  let listener,
+    playhead = 0,
+    timerId = 0,
+    calls = 0;
+  class Recorder {
+    state = 'inactive';
+    start() {
+      this.state = 'recording';
+    }
+    stop() {
+      this.state = 'inactive';
+      this.ondataavailable({ data: new Blob([new Uint8Array(1500)], { type: 'audio/webm' }) });
+      this.onstop();
+    }
+  }
+  class Audio {
+    createMediaStreamSource() {
+      return { connect() {} };
+    }
+    createAnalyser() {
+      return {
+        fftSize: 2048,
+        connect() {},
+        getByteTimeDomainData(samples) {
+          samples.fill(128);
+        },
+      };
+    }
+    async resume() {}
+    async close() {}
+    get destination() {
+      return {};
+    }
+  }
+  const context = {
+    AbortController,
+    AudioContext: Audio,
+    Blob,
+    MediaRecorder: Recorder,
+    prepareSpeechAudio: async (blob) => blob,
+    isQwenAsr: () => true,
+    transcribe: async () => {
+      calls++;
+      throw new Error('silent audio must not be sent');
+    },
+    navigator: {
+      mediaDevices: {
+        getUserMedia: async () => ({
+          getAudioTracks: () => [{ addEventListener() {} }],
+          getTracks: () => [{ stop() {} }],
+        }),
+      },
+    },
+    setTimeout(fn, ms) {
+      const id = ++timerId;
+      timers.set(id, { fn, ms });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    setInterval() {
+      return ++timerId;
+    },
+    clearInterval() {},
+    chrome: {
+      runtime: {
+        id: 'fixture',
+        getURL: (path) => `chrome-extension://fixture/${path}`,
+        onMessage: {
+          addListener(fn) {
+            listener = fn;
+          },
+        },
+        async sendMessage(message) {
+          messages.push(message);
+          return message.type === 'CAPTURE_POSITION'
+            ? { ok: true, data: { time: playhead, duration: 80, paused: false, rate: 1 } }
+            : { ok: true };
+        },
+      },
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  const sender = { id: 'fixture', url: 'chrome-extension://fixture/background.js' };
+  const command = (type, fields = {}) =>
+    new Promise((resolve) => {
+      listener({ target: 'offscreen', type, recordId: 'video', ...fields }, sender, resolve);
+    });
+  const flush = async (predicate) => {
+    for (let i = 0; i < 60 && !predicate(); i++) await new Promise(setImmediate);
+    assert.ok(predicate());
+  };
+  const plan = planAsrSegments(0, 70);
+  assert.equal((await command('START', { streamId: 'stream', settings: {}, plan })).ok, true);
+  assert.equal((await command('RUN')).ok, true);
+  await flush(() => messages.some((m) => m.type === 'ASR_PROGRESS' && m.status === 'capturing'));
+  playhead = 10;
+  [...timers.values()][0].fn();
+  await flush(() => messages.some((m) => m.type === 'ASR_CHUNK' && m.segmentId === plan[0].id));
+  await flush(() =>
+    messages.some(
+      (m) => m.type === 'ASR_PROGRESS' && m.segmentId === plan[1].id && m.status === 'capturing',
+    ),
+  );
+  assert.equal(calls, 0);
+  assert.equal(messages.find((m) => m.type === 'ASR_CHUNK').segments.length, 0);
+  assert.equal(
+    messages.some((m) => m.type === 'ASR_PROGRESS' && m.status === 'failed'),
+    false,
+  );
+  playhead = 70;
+  [...timers.values()][0].fn();
+  await flush(() => messages.some((m) => m.type === 'ASR_FINISHED'));
+  assert.equal(messages.filter((m) => m.type === 'ASR_CHUNK').length, 2);
+  assert.equal(calls, 0);
+});

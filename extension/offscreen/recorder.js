@@ -121,6 +121,21 @@ async function recordChunk(s) {
               segment.end,
               Math.max(offset + 0.1, Number(endState?.time) || segment.end),
             );
+            // A truly silent clip has no words to send to ASR. Ambient sound
+            // above this tiny threshold still goes to the model for a decision.
+            if (samples && audioLevel < 0.004) {
+              const reply = await send({
+                type: 'ASR_CHUNK',
+                recordId: s.recordId,
+                segmentId: segment.id,
+                capturedEnd,
+                segments: [],
+                completed: s.completed + 1,
+              });
+              if (!reply?.ok) throw new Error(reply?.error || '静音段保存失败');
+              s.completed++;
+              return;
+            }
             const timeoutMs = isQwenAsr(s.settings)
               ? Math.min(120000, Math.max(60000, Math.round((segment.end - offset) * 2000)))
               : Math.min(75000, Math.max(45000, Math.round((segment.end - offset) * 1250)));

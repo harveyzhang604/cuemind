@@ -79,6 +79,43 @@ export async function limitedText(response, maxBytes = 2_000_000) {
     reader.releaseLock();
   }
 }
+export async function asrHttpFailure(response) {
+  const fallback = {
+    401: 'API Key 无效',
+    403: '语音模型访问被拒绝',
+    429: '请求过多或额度不足',
+  }[response.status];
+  let details;
+  try {
+    details = JSON.parse(await limitedText(response, 4096));
+  } catch {
+    // Error pages can contain HTML or echo the submitted audio. Never show them.
+  }
+  const issue = details?.error || details;
+  const noSpeech =
+    response.status === 400 &&
+    /(?:no[-_. ]?(?:valid[-_. ]?)?(?:speech|voice)|speech (?:was )?not detected|silent audio|silence detected|无.{0,4}(?:人声|语音)|静音)/i.test(
+      `${issue?.code || ''} ${issue?.message || ''}`,
+    );
+  const code =
+    typeof issue?.code === 'string' && /^[\w.-]{1,80}$/.test(issue.code) ? issue.code : '';
+  const message =
+    typeof issue?.message === 'string' &&
+    issue.message.length <= 240 &&
+    !/data:|base64|bearer|authorization|api.?key|sk-[a-z\d_-]{8,}/i.test(issue.message)
+      ? issue.message.replace(/[\r\n\t]+/g, ' ').trim()
+      : '';
+  const requestId = details?.request_id || details?.requestId;
+  const id =
+    typeof requestId === 'string' && /^[\w-]{8,100}$/.test(requestId)
+      ? `；请求 ID：${requestId}`
+      : '';
+  const failure = new Error(
+    `ASR 请求失败（HTTP ${response.status}${code ? `，${code}` : ''}）${message ? `：${message}` : fallback ? `：${fallback}` : '，请检查服务状态'}${id}`,
+  );
+  failure.noSpeech = noSpeech;
+  return failure;
+}
 export async function completion(settings, system, input, signal, capability = '') {
   const s = { ...defaults, ...settings };
   const base = endpoint(s.baseUrl),
@@ -213,12 +250,9 @@ export async function transcribe(blob, settings, signal, filename, options = {})
       redirect: 'error',
     });
     if (!response.ok) {
-      const reason = {
-        401: 'API Key 无效',
-        403: '语音模型访问被拒绝',
-        429: '请求过多或额度不足',
-      }[response.status];
-      throw new Error(reason || `ASR 请求失败（HTTP ${response.status}），请检查服务状态。`);
+      const failure = await asrHttpFailure(response);
+      if (failure.noSpeech) return [];
+      throw failure;
     }
     stage = '接收识别结果';
     if (doubao && response.headers.get('X-Api-Status-Code') === '20000003') {

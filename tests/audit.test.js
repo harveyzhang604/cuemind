@@ -160,6 +160,20 @@ test('Qwen 3.0 SSE accumulates completed sentences without saving a partial resu
   ]);
   assert.throws(()=>qwenSegments(parseQwenResponse(raw.split('\n\n')[1],'text/event-stream')),/部分句子/);
 });
+test('ASR distinguishes silent audio from a real HTTP 400 and retains safe provider diagnostics',async()=>{
+  const {QWEN_ASR_URL,pcmWave}=await import('../extension/services/speech.js');
+  const audio=pcmWave(new Float32Array(16000));
+  const cfg={asrUrl:QWEN_ASR_URL,asrModel:'qwen-audio-3.1-asr-flash',asrKey:'fixture-key'};
+  const previous=global.fetch;
+  try{
+    global.fetch=async()=>new Response(JSON.stringify({code:'Audio.NoSpeech',message:'No speech detected',request_id:'request-12345678'}),{status:400});
+    assert.deepEqual(await transcribe(audio,cfg),[]);
+    global.fetch=async()=>new Response(JSON.stringify({code:'InvalidParameter',message:'The audio format is illegal and cannot be opened.',request_id:'request-87654321'}),{status:400});
+    await assert.rejects(()=>transcribe(audio,cfg),/HTTP 400，InvalidParameter.*audio format.*request-87654321/);
+    global.fetch=async()=>new Response(JSON.stringify({code:'InvalidParameter',message:'Bearer sk-secret123456789 data:audio/wav;base64,abc'}),{status:400});
+    await assert.rejects(()=>transcribe(audio,cfg),error=>!error.message.includes('sk-secret')&&!error.message.includes('base64'));
+  }finally{global.fetch=previous;}
+});
 test('speech network check sends neither keys nor audio and accepts method-not-allowed as reachable',async()=>{
   const {checkSpeechNetwork}=await import('../extension/services/speech.js');
   const previous=global.fetch;let sent;
