@@ -2,15 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { planAsrSegments, skipRecognizedAudio } from '../extension/core/asr-progress.js';
 
-test('ASR plans a short first segment and rolling two-minute segments only after the playhead', () => {
+test('ASR plans a short first segment and rolling one-minute segments only after the playhead', () => {
   const plan = planAsrSegments(7200, 7505);
   assert.deepEqual(
     plan.map(({ start, end, status }) => [start, end, status]),
     [
-      [7200, 7230, 'pending'],
-      [7230, 7350, 'pending'],
-      [7350, 7470, 'pending'],
-      [7470, 7505, 'pending'],
+      [7200, 7220, 'pending'],
+      [7220, 7280, 'pending'],
+      [7280, 7340, 'pending'],
+      [7340, 7400, 'pending'],
+      [7400, 7460, 'pending'],
+      [7460, 7505, 'pending'],
     ],
   );
   assert.deepEqual(planAsrSegments(99, 100), []);

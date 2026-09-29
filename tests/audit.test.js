@@ -92,6 +92,20 @@ test('ASR preserves original audio filename and rejects invalid timestamps',asyn
     valid=false;await assert.rejects(()=>transcribe(new Blob(['audio']),{asrKey:'test'}),/时间戳/);
   }finally{global.fetch=previous;}
 });
+test('ASR request timeout aborts a stalled upload and reports the configured wait',async()=>{
+  const previous=global.fetch;let requests=0;
+  global.fetch=(_url,{signal})=>new Promise((_resolve,reject)=>{
+    requests++;
+    signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});
+  });
+  try{
+    await assert.rejects(
+      ()=>transcribe(new Blob(['audio'],{type:'audio/webm'}),{asrKey:'test'},undefined,undefined,{timeoutMs:5000}),
+      /超过 5 秒仍无响应/
+    );
+    assert.equal(requests,1);
+  }finally{global.fetch=previous;}
+});
 test('changed translation configuration removes stale language before partial retry',async()=>{
   const previous=global.fetch;
   const r=demoRecord();r.tasks={translation:{signature:'old',done:[0],failed:[]}};

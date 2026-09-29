@@ -215,7 +215,7 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  const next = await f.route({type:'CAPTURE_START',recordId:prior.id,tabId:1});
  assert.ok(seeks[0]>=70&&seeks[0]<71,'the saved minute must not be recognized again');
  assert.equal(next.transcriptMeta.asrSegments[0].start,seeks[0]);
- assert.equal(next.transcriptMeta.asrSegments[0].end,seeks[0]+30);
+ assert.equal(next.transcriptMeta.asrSegments[0].end,seeks[0]+20);
  assert.equal(next.rawCaptions.length,1);
  assert.equal(next.sentences[0].translation,'第一回合。');
  const listener = f.listeners[0],sender={id:'fixture',url:'chrome-extension://fixture/offscreen/index.html'};
@@ -225,7 +225,7 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  });
  const firstSegment = next.transcriptMeta.asrSegments[0];
  await event({type:'ASR_PROGRESS',recordId:next.id,segmentId:firstSegment.id,status:'capturing'});
- await event({type:'ASR_CHUNK',recordId:next.id,segmentId:firstSegment.id,capturedEnd:100,segments:[{start:71,end:73,text:'Second round.'}],completed:1});
+ await event({type:'ASR_CHUNK',recordId:next.id,segmentId:firstSegment.id,capturedEnd:90,segments:[{start:71,end:73,text:'Second round.'}],completed:1});
  const saved = f.stores.videos.get(next.id);
  assert.equal(saved.rawCaptions.length,2);
  assert.equal(saved.sentences[0].translation,'第一回合。');
@@ -233,7 +233,7 @@ test('Migu audio recognition continues after saved audio and reuses prior transl
  assert.equal(saved.transcriptMeta.asrSegments[0].status,'source-ready');
  playback.time=130;
  await event({type:'ASR_FINISHED',recordId:next.id});
- assert.equal(f.stores.videos.get(next.id).transcriptMeta.capturedUntil,100);
+ assert.equal(f.stores.videos.get(next.id).transcriptMeta.capturedUntil,90);
  assert.equal(seeks.length,1,'continuous recognition does not rewind the player');
 });
 
@@ -258,7 +258,7 @@ test('rolling ASR saves each source segment, translates it, and keeps earlier bi
   return {record,errors:[]};
  };
  const started = await f.route({type:'CAPTURE_START',recordId:loaded.record.id,tabId:1});
- assert.deepEqual(Array.from(started.transcriptMeta.asrSegments.slice(0,2),s=>[s.start,s.end]),[[0,30],[30,150]]);
+ assert.deepEqual(Array.from(started.transcriptMeta.asrSegments.slice(0,2),s=>[s.start,s.end]),[[0,20],[20,80]]);
  const listener = f.listeners[0],sender={id:'fixture',url:'chrome-extension://fixture/offscreen/index.html'};
  const event = m => new Promise((resolve,reject)=>{
   const pending=listener(m,sender,reply=>reply?.ok?resolve(reply):reject(new Error(reply?.error||'missing reply')));
@@ -267,19 +267,19 @@ test('rolling ASR saves each source segment, translates it, and keeps earlier bi
  const [first,second,third] = started.transcriptMeta.asrSegments;
  await event({type:'ASR_PROGRESS',recordId:started.id,segmentId:first.id,status:'capturing'});
  await event({type:'ASR_PROGRESS',recordId:started.id,segmentId:first.id,status:'recognizing'});
- await event({type:'ASR_CHUNK',recordId:started.id,segmentId:first.id,capturedEnd:30,segments:[{start:1,end:3,text:'Hello.'}],completed:1});
+ await event({type:'ASR_CHUNK',recordId:started.id,segmentId:first.id,capturedEnd:20,segments:[{start:1,end:3,text:'Hello.'}],completed:1});
  await vm.runInContext('capture.translationQueue',f.context);
  assert.equal(f.stores.videos.get(started.id).sentences[0].translation,'中：Hello.');
  assert.equal(f.stores.videos.get(started.id).transcriptMeta.asrSegments[0].status,'done');
- await event({type:'ASR_CHUNK',recordId:started.id,segmentId:second.id,capturedEnd:100,segments:[{start:31,end:34,text:'How are you?'}],completed:2});
+ await event({type:'ASR_CHUNK',recordId:started.id,segmentId:second.id,capturedEnd:60,segments:[{start:21,end:24,text:'How are you?'}],completed:2});
  await vm.runInContext('capture.translationQueue',f.context);
  const saved = f.stores.videos.get(started.id);
  assert.deepEqual(Array.from(saved.sentences,s=>s.translation),['中：Hello.','中：How are you?']);
  assert.equal(saved.transcriptMeta.asrSegments[1].status,'done');
- assert.equal(saved.transcriptMeta.asrSegments[1].end,100);
+ assert.equal(saved.transcriptMeta.asrSegments[1].end,60);
  assert.equal(saved.transcriptMeta.asrSegments[2].status,'interrupted');
- assert.equal(saved.transcriptMeta.asrSegments[2].start,100);
- assert.equal(saved.transcriptMeta.asrSegments[2].end,150);
+ assert.equal(saved.transcriptMeta.asrSegments[2].start,60);
+ assert.equal(saved.transcriptMeta.asrSegments[2].end,80);
  assert.deepEqual(calls.map(ids=>ids.length),[1,1],'previous bilingual lines must not be sent again');
  await event({type:'ASR_PROGRESS',recordId:started.id,segmentId:third.id,status:'failed',error:'ASR unavailable'});
  await event({type:'ASR_FINISHED',recordId:started.id,error:'ASR unavailable'});

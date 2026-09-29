@@ -60,11 +60,12 @@ export async function cachedCompletion(
   return data;
 }
 
-export async function cachedTranscribe(blob, settings, signal, filename) {
+export async function cachedTranscribe(blob, settings, signal, filename, options) {
   if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
   if (blob.size > 24 * 1024 * 1024)
     throw new Error('音频超过 24 MB，请选择较小文件或使用分块录音。');
-  if (typeof indexedDB === 'undefined') return transcribe(blob, settings, signal, filename);
+  if (typeof indexedDB === 'undefined')
+    return transcribe(blob, settings, signal, filename, options);
   const cfg = { ...defaults, ...settings };
   const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
   const audioHash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join(
@@ -92,7 +93,7 @@ export async function cachedTranscribe(blob, settings, signal, filename) {
     )
   )
     return saved.data;
-  const segments = await transcribe(blob, settings, signal, filename);
+  const segments = await transcribe(blob, settings, signal, filename, options);
   await db.put('aiCache', { id, data: segments, createdAt: Date.now() });
   return segments;
 }

@@ -1,5 +1,5 @@
-export const FIRST_ASR_SECONDS = 30;
-export const NEXT_ASR_SECONDS = 120;
+export const FIRST_ASR_SECONDS = 20;
+export const NEXT_ASR_SECONDS = 60;
 
 // Only plan audio after the current playhead. Nothing before it is requested
 // from the speech service unless the user deliberately seeks back there.

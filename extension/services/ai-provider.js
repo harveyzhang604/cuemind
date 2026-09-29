@@ -147,7 +147,7 @@ export async function completion(settings, system, input, signal, capability = '
   }
   throw last;
 }
-export async function transcribe(blob, settings, signal, filename) {
+export async function transcribe(blob, settings, signal, filename, options = {}) {
   const s = { ...defaults, ...settings };
   if (!s.asrKey) throw new Error('请先配置 ASR API Key。');
   if (blob.size > 24 * 1024 * 1024)
@@ -175,7 +175,10 @@ export async function transcribe(blob, settings, signal, filename) {
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
-  const timer = setTimeout(abort, 180000);
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? Math.min(180000, Math.max(5000, options.timeoutMs))
+    : 180000;
+  const timer = setTimeout(abort, timeoutMs);
   try {
     const response = await fetch(`${endpoint(s.asrUrl)}/audio/transcriptions`, {
       method: 'POST',
@@ -184,8 +187,14 @@ export async function transcribe(blob, settings, signal, filename) {
       signal: controller.signal,
       redirect: 'error',
     });
-    if (!response.ok)
-      throw new Error(`ASR 请求失败（HTTP ${response.status}），请检查 Key、额度和模型。`);
+    if (!response.ok) {
+      const reason = {
+        401: 'API Key 无效',
+        403: '语音模型访问被拒绝',
+        429: '请求过多或额度不足',
+      }[response.status];
+      throw new Error(reason || `ASR 请求失败（HTTP ${response.status}），请检查服务状态。`);
+    }
     const data = JSON.parse(await limitedText(response, 5_000_000));
     if (
       !Array.isArray(data.segments) ||
@@ -205,7 +214,10 @@ export async function transcribe(blob, settings, signal, filename) {
     if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
     return data.segments;
   } catch (e) {
-    if (controller.signal.aborted && !signal?.aborted) throw new Error('ASR 请求超时，请重试。');
+    if (controller.signal.aborted && !signal?.aborted)
+      throw new Error(
+        `ASR 请求超过 ${Math.ceil(timeoutMs / 1000)} 秒仍无响应，请检查语音服务或网络。`,
+      );
     throw e;
   } finally {
     clearTimeout(timer);

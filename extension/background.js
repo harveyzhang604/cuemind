@@ -917,7 +917,9 @@ async function route(m) {
       record.transcriptMeta.asrSegments = [
         ...(Array.isArray(original.transcriptMeta.asrSegments)
           ? original.transcriptMeta.asrSegments.map((segment) =>
-              ['pending', 'capturing', 'recognizing', 'translating'].includes(segment.status)
+              ['pending', 'capturing', 'queued', 'recognizing', 'translating'].includes(
+                segment.status,
+              )
                 ? { ...segment, status: 'interrupted', error: '上次识别已中断' }
                 : segment,
             )
@@ -1157,18 +1159,26 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       const drift = s.lastTick
         ? Math.abs(m.time - s.lastTick.time - (now - s.lastTick.clock) / 1000)
         : 0;
-      if (
-        m.type === 'PAGE_CHANGED' ||
-        m.videoKey !== s.videoKey ||
-        m.isAd ||
-        m.seeking ||
-        m.rate !== 1 ||
-        m.readyState < 2 ||
-        drift > 0.8
-      )
+      const interruption =
+        m.type === 'PAGE_CHANGED' || m.videoKey !== s.videoKey
+          ? '视频已切换'
+          : m.isAd
+            ? '视频进入广告'
+            : m.seeking
+              ? '视频发生跳转'
+              : m.rate !== 1
+                ? '播放速度发生变化'
+                : m.paused
+                  ? ''
+                  : m.readyState < 2
+                    ? '视频正在缓冲'
+                    : drift > 0.8
+                      ? '播放时间与录音不同步'
+                      : '';
+      if (interruption)
         stopCapture({
           discard: true,
-          reason: '广告、视频跳转、变速或缓冲中断了连续录音；已保留此前完成的音频块。',
+          reason: `${interruption}，已结束本次录音；此前完成的字幕已保留。`,
         });
       else if (m.paused) stopCapture();
       s.lastTick = { time: m.time, clock: now };
@@ -1189,12 +1199,17 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     (async () => {
       const s = capture;
       if (s?.record?.id !== m.recordId) throw new Error('音频识别会话已结束');
-      if (!['capturing', 'recognizing', 'failed'].includes(m.status))
+      if (!['capturing', 'queued', 'recognizing', 'failed'].includes(m.status))
         throw new Error('音频识别状态无效');
       await captureWrite(s, async () => {
         const segment = captureSegment(s, m.segmentId);
         if (!segment) throw new Error('音频片段不存在');
         segment.status = m.status;
+        if (m.status === 'queued') segment.queuedAt = Date.now();
+        if (m.status === 'recognizing') {
+          segment.recognizingAt = Date.now();
+          if (Number.isFinite(m.timeoutMs)) segment.timeoutMs = m.timeoutMs;
+        }
         if (Number.isFinite(m.start) && m.start >= 0) segment.start = m.start;
         if (Number.isFinite(m.end) && m.end > segment.start) segment.end = m.end;
         if (m.status === 'failed') segment.error = String(m.error || '识别失败').slice(0, 240);
@@ -1290,7 +1305,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
         await store(s.record);
       }
       for (const segment of s.record.transcriptMeta.asrSegments || [])
-        if (['capturing', 'recognizing', 'translating'].includes(segment.status)) {
+        if (['capturing', 'queued', 'recognizing', 'translating'].includes(segment.status)) {
           segment.status = 'interrupted';
           segment.error ||= '识别中断，可从此位置重试';
         }

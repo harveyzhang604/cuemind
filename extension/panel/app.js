@@ -60,7 +60,8 @@ let availableTracks = [],
   statusTimer,
   settings = {},
   progressVersion = 0,
-  captureInfo = null;
+  captureInfo = null,
+  asrElapsedTimer = null;
 const focus = createFocusUI({
   getRecord: () => record,
   getTime: () => time,
@@ -2431,6 +2432,52 @@ $('#record').onclick = guard(async () => {
     if (gen === generation) busy = false;
   }
 });
+const asrLabels = {
+  pending: '未开始',
+  capturing: '正在采集音频',
+  queued: '音频已采集，等待语音服务',
+  recognizing: '正在识别原文',
+  'source-ready': '原文成功，等待翻译',
+  translating: '正在生成译文',
+  done: '双语成功',
+  'translation-failed': '原文成功，译文失败',
+  'no-speech': '已识别，无可辨语音',
+  failed: '识别失败',
+  interrupted: '已中断',
+};
+function asrStatusText(segment) {
+  const label = asrLabels[segment.status] || segment.status;
+  const start = segment.status === 'recognizing' ? segment.recognizingAt : segment.queuedAt;
+  if (!['recognizing', 'queued'].includes(segment.status) || !Number.isFinite(start)) return label;
+  const elapsed = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  return segment.status === 'recognizing' && segment.timeoutMs
+    ? `${label} · 已等待 ${elapsed}/${Math.ceil(segment.timeoutMs / 1000)} 秒`
+    : `${label} · 已等待 ${elapsed} 秒`;
+}
+function refreshAsrElapsed() {
+  const all = record?.transcriptMeta.asrSegments || [];
+  const sessionId = record?.transcriptMeta.asrSessionId;
+  const active = all.filter(
+    (segment) =>
+      (!sessionId || segment.sessionId === sessionId) &&
+      ['recognizing', 'queued'].includes(segment.status),
+  );
+  for (const segment of active) {
+    const row = [...$('#asr-segment-list').children].find(
+      (entry) => entry.dataset.segmentId === segment.id,
+    );
+    const value = row?.querySelector('strong');
+    if (value) value.textContent = asrStatusText(segment);
+  }
+  const last = all.findLast(
+    (segment) =>
+      (!sessionId || segment.sessionId === sessionId) &&
+      ['capturing', 'queued', 'recognizing', 'translating'].includes(segment.status),
+  );
+  if (last && ['recognizing', 'queued'].includes(last.status))
+    $('#asr-current-segment').textContent =
+      `当前 ${formatTime(last.start)}–${formatTime(last.end)}：${asrStatusText(last)}`;
+}
 function renderAsrSegments() {
   const all = record?.transcriptMeta.asrSegments || [];
   const sessionId = record?.transcriptMeta.asrSessionId;
@@ -2447,24 +2494,12 @@ function renderAsrSegments() {
   ).length;
   $('#asr-plan-summary').textContent =
     `计划 ${segments.length} 段 · 原文成功 ${originalReady}${silent ? ` · 无语音 ${silent}` : ''} · 双语完成 ${bilingual} · 失败 ${failed}`;
-  const labels = {
-    pending: '未开始',
-    capturing: '正在采集音频',
-    recognizing: '正在识别原文',
-    'source-ready': '原文成功，等待翻译',
-    translating: '正在生成译文',
-    done: '双语成功',
-    'translation-failed': '原文成功，译文失败',
-    'no-speech': '已识别，无可辨语音',
-    failed: '识别失败',
-    interrupted: '已中断',
-  };
   const activeSegment = segments.findLast((segment) =>
-    ['capturing', 'recognizing', 'translating'].includes(segment.status),
+    ['capturing', 'queued', 'recognizing', 'translating'].includes(segment.status),
   );
   const nextSegment = segments.find((segment) => segment.status === 'pending');
   $('#asr-current-segment').textContent = activeSegment
-    ? `当前 ${formatTime(activeSegment.start)}–${formatTime(activeSegment.end)}：${labels[activeSegment.status]}`
+    ? `当前 ${formatTime(activeSegment.start)}–${formatTime(activeSegment.end)}：${asrStatusText(activeSegment)}`
     : recording && nextSegment
       ? `下一段 ${formatTime(nextSegment.start)}–${formatTime(nextSegment.end)}：等待播放`
       : '当前没有正在处理的片段；已完成结果保存在本机。';
@@ -2474,20 +2509,17 @@ function renderAsrSegments() {
     ),
   );
   $('#asr-last-segment').textContent = lastResult
-    ? `已处理区间 ${formatTime(lastResult.start)}–${formatTime(lastResult.end)}：${labels[lastResult.status]}${lastResult.error ? ` · ${lastResult.error}` : ''}`
+    ? `已处理区间 ${formatTime(lastResult.start)}–${formatTime(lastResult.end)}：${asrStatusText(lastResult)}${lastResult.error ? ` · ${lastResult.error}` : ''}`
     : '';
   const list = $('#asr-segment-list');
   list.replaceChildren();
   for (const [index, segment] of segments.entries()) {
     const row = el('div', 'asr-segment');
     row.dataset.status = segment.status;
+    row.dataset.segmentId = segment.id;
     row.append(
       el('span', '', `${index + 1}. ${formatTime(segment.start)}–${formatTime(segment.end)}`),
-      el(
-        'strong',
-        '',
-        `${labels[segment.status] || segment.status}${segment.error ? ` · ${segment.error}` : ''}`,
-      ),
+      el('strong', '', `${asrStatusText(segment)}${segment.error ? ` · ${segment.error}` : ''}`),
     );
     list.append(row);
   }
@@ -2501,6 +2533,11 @@ function renderCapture() {
   }
   const mine = recording && captureInfo?.recordId === record?.id;
   bar.hidden = !recording;
+  if (recording && !asrElapsedTimer) asrElapsedTimer = setInterval(refreshAsrElapsed, 1000);
+  if (!recording && asrElapsedTimer) {
+    clearInterval(asrElapsedTimer);
+    asrElapsedTimer = null;
+  }
   bar.replaceChildren();
   const raw = record?.rawCaptions || [],
     asr = record?.transcriptMeta.source?.includes('whisper'),

@@ -16,6 +16,7 @@ async function prepare(m) {
     queue: Promise.resolve(),
     completed: 0,
     pending: 0,
+    failed: false,
     plan: Array.isArray(m.plan) ? m.plan : [],
     nextIndex: 0,
     stopping: false,
@@ -78,14 +79,27 @@ async function recordChunk(s) {
       const endPosition = position(s).catch(() => null);
       s.discardCurrent = false;
       if (!discard && blob.size >= 1000 && !s.controller.signal.aborted) {
+        const waiting = s.pending
+          ? send({
+              type: 'ASR_PROGRESS',
+              recordId: s.recordId,
+              segmentId: segment.id,
+              status: 'queued',
+            }).catch(() => {})
+          : Promise.resolve();
         s.pending++;
         s.queue = s.queue.then(async () => {
-          if (s.controller.signal.aborted) return;
           try {
+            await waiting;
+            if (s.controller.signal.aborted || s.failed) return;
             const endState = await endPosition;
             const capturedEnd = Math.min(
               segment.end,
               Math.max(offset + 0.1, Number(endState?.time) || segment.end),
+            );
+            const timeoutMs = Math.min(
+              75000,
+              Math.max(45000, Math.round((segment.end - offset) * 1250)),
             );
             await send({
               type: 'ASR_PROGRESS',
@@ -93,16 +107,11 @@ async function recordChunk(s) {
               segmentId: segment.id,
               status: 'recognizing',
               end: capturedEnd,
+              timeoutMs,
             });
-            let result;
-            for (let attempt = 0; attempt < 2; attempt++) {
-              try {
-                result = await transcribe(blob, s.settings, s.controller.signal);
-                break;
-              } catch (e) {
-                if (attempt || s.controller.signal.aborted) throw e;
-              }
-            }
+            const result = await transcribe(blob, s.settings, s.controller.signal, undefined, {
+              timeoutMs,
+            });
             const reply = await send({
               type: 'ASR_CHUNK',
               recordId: s.recordId,
@@ -115,7 +124,8 @@ async function recordChunk(s) {
             s.completed++;
           } catch (e) {
             if (!s.controller.signal.aborted) {
-              s.errors.push(`${Math.floor(offset)} 秒附近：${e.message}`);
+              s.failed = true;
+              s.errors.unshift(`${Math.floor(offset)} 秒附近：${e.message}`);
               await send({
                 type: 'ASR_PROGRESS',
                 recordId: s.recordId,
@@ -123,23 +133,31 @@ async function recordChunk(s) {
                 status: 'failed',
                 error: e.message,
               }).catch(() => {});
+              stop(s, { discard: true });
             }
           } finally {
             s.pending--;
           }
         });
       }
-      if (blob.size < 1000 && !discard && !s.controller.signal.aborted)
+      if (blob.size < 1000 && !discard && !s.controller.signal.aborted) {
+        s.failed = true;
+        s.stopping = true;
+        s.errors.unshift(`${Math.floor(offset)} 秒附近：这一段没有可识别的音频`);
         send({
           type: 'ASR_PROGRESS',
           recordId: s.recordId,
           segmentId: segment.id,
           status: 'failed',
           error: '这一段没有可识别的音频',
-        }).catch(() => {});
-      if (s.pending >= 3 && !s.stopping) {
+        })
+          .catch(() => {})
+          .finally(() => finish(s));
+        return;
+      }
+      if (s.pending >= 2 && !s.stopping) {
         s.stopping = true;
-        s.errors.push('转写速度落后于播放，已停止录音并处理已有音频。');
+        s.errors.push('语音服务处理速度落后于播放，已停止采集并处理已录好的音频。');
       }
       if (s.stopping) finish(s);
       else recordChunk(s);

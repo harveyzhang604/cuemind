@@ -106,7 +106,7 @@ Its key is separate from the text-model key. CueMind requests existing captions 
 
 Configure Groq, OpenAI, or a timestamp-capable Whisper-compatible service in the speech section of settings. Groq keys are available from the [Groq console](https://console.groq.com/keys).
 
-Choose **⋯ → 导入字幕与音频** (Import subtitles and audio) to import SRT/VTT, upload an audio file, or choose **识别当前视频音频** (Transcribe current video audio). CueMind captures only the playing audio, not video frames, and sends it to your selected transcription service. Playback runs at 1× so the transcript aligns with video timestamps. Transcription starts only when you request it; provider charges may apply. The panel plans the remaining video in an initial roughly 30-second segment followed by roughly two-minute segments, with status for each.
+Choose **⋯ → 导入字幕与音频** (Import subtitles and audio) to import SRT/VTT, upload an audio file, or choose **识别当前视频音频** (Transcribe current video audio). CueMind captures only the playing audio, not video frames, and sends it to your selected transcription service. Playback runs at 1× so the transcript aligns with video timestamps. Transcription starts only when you request it; provider charges may apply. The panel plans the remaining video in an initial roughly 20-second segment followed by roughly one-minute segments, showing queue time and results for each. If the speech service times out, capture stops while completed subtitles remain saved locally; you can retry from the failed interval.
 
 Text models, Supadata, and transcription use separate settings and keys. A video with available platform captions usually does not need a speech service.
 
