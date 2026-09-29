@@ -56,3 +56,24 @@ test('Migu ASR translation uses only source text and rejects unrelated event des
   assert.equal(record.sentences[0].translation,response);
  }finally{global.fetch=original;}
 });
+test('automatic Migu translation repairs an omitted line alone and uses short batches',async()=>{
+ const previous=global.fetch,requests=[];
+ let first=true;
+ global.fetch=async(_url,init)=>{
+  const input=JSON.parse(JSON.parse(init.body).messages.at(-1).content);
+  requests.push(input);
+  const translations=input.items.map(item=>({id:item.id,text:first&&item.id==='s0'?'2026 UFC 赛事介绍。':'准确译文。'}));
+  first=false;
+  return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({translations})}}]}));
+ };
+ const sentences=Array.from({length:7},(_,i)=>({id:`s${i}`,start:i*4,end:i*4+3,rawText:`This is sentence ${i} about an ordinary conversation with several simple words.`}));
+ const record={videoInfo:{platform:'migu',title:'UFC'},transcriptMeta:{source:'whisper'},sentences};
+ try{
+  const result=await runTask(record,'translation',{apiKey:'fixture',targetLanguage:'简体中文'},{currentTime:0},signal(),async()=>{},()=>{});
+  assert.equal(result.partial,false);
+  assert.ok(record.sentences.every(sentence=>sentence.translation==='准确译文。'));
+  assert.ok(requests.some(input=>input.repair&&input.items.length===1&&input.items[0].id==='s0'));
+  assert.ok(requests.filter(input=>!input.repair).length>1);
+  assert.ok(requests.filter(input=>!input.repair).every(input=>input.items.length<=4));
+ }finally{global.fetch=previous;}
+});

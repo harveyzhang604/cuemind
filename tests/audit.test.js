@@ -168,6 +168,8 @@ test('ASR distinguishes silent audio from a real HTTP 400 and retains safe provi
   try{
     global.fetch=async()=>new Response(JSON.stringify({code:'Audio.NoSpeech',message:'No speech detected',request_id:'request-12345678'}),{status:400});
     assert.deepEqual(await transcribe(audio,cfg),[]);
+    global.fetch=async()=>new Response(JSON.stringify({code:'CLIENT_ERROR',message:'ASR_RESPONSE_HAVE_NO_WORDS',request_id:'476a63e8-a2bb-9c50-829b-c114dbc5aaa3'}),{status:400});
+    assert.deepEqual(await transcribe(audio,cfg),[]);
     global.fetch=async()=>new Response(JSON.stringify({code:'InvalidParameter',message:'The audio format is illegal and cannot be opened.',request_id:'request-87654321'}),{status:400});
     await assert.rejects(()=>transcribe(audio,cfg),/HTTP 400，InvalidParameter.*audio format.*request-87654321/);
     global.fetch=async()=>new Response(JSON.stringify({code:'InvalidParameter',message:'Bearer sk-secret123456789 data:audio/wav;base64,abc'}),{status:400});

@@ -127,6 +127,37 @@ export async function runTask(record, capability, settings, args, signal, save, 
       reusable,
       { force: !!args.force },
     );
+  const translateChunk = async (chunk, data) => {
+    const aligned = alignTranslations(
+      chunk,
+      validTranslations(chunk, Array.isArray(data?.translations) ? data.translations : []),
+    );
+    if (!strictTranslation) return aligned;
+    for (const [index, sentence] of aligned.entries()) {
+      if (sentence.translation) continue;
+      if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+      try {
+        // Retry only the missing line. A long mixed-speech batch can make the
+        // model omit or embellish one sentence while the other lines are sound.
+        const repaired = await request(
+          {
+            targetLanguage: settings.targetLanguage,
+            items: [{ id: sentence.id, text: sentence.rawText }],
+            repair: '只翻译这一条原文，不补充背景或其他句子的内容。',
+          },
+          (result) => reusableRows(result, [sentence]),
+        );
+        const [fixed] = alignTranslations(
+          [sentence],
+          validTranslations([sentence], repaired?.translations || []),
+        );
+        if (fixed.translation) aligned[index] = fixed;
+      } catch (error) {
+        if (signal.aborted) throw error;
+      }
+    }
+    return aligned;
+  };
   if (['qa', 'explain', 'refine'].includes(capability)) {
     const context = qaContext(record.sentences, {
       question: args.question || args.selectedText || '',
@@ -248,7 +279,7 @@ export async function runTask(record, capability, settings, args, signal, save, 
           },
           (data) => reusableRows(data, chunk),
         );
-        const aligned = alignTranslations(chunk, validTranslations(chunk, data.translations));
+        const aligned = await translateChunk(chunk, data);
         if (signal.aborted) throw new DOMException('已取消', 'AbortError');
         for (const s of aligned)
           if (s.translation) {
@@ -285,7 +316,13 @@ export async function runTask(record, capability, settings, args, signal, save, 
   const list = capability === 'boundary' ? record.rawCaptions : record.sentences;
   const chunks = batches(
     list,
-    capability === 'translation' ? 1400 : capability === 'analysis' ? 5000 : 6500,
+    capability === 'translation'
+      ? strictTranslation
+        ? 500
+        : 1400
+      : capability === 'analysis'
+        ? 5000
+        : 6500,
     capability === 'study' ? 2 : 0,
   );
   const status = prior?.signature === signature ? prior : { done: [], failed: [], signature };
@@ -444,7 +481,7 @@ export async function runTask(record, capability, settings, args, signal, save, 
               : false;
       let data = capability === 'analysis' ? null : await request(input, reusable);
       if (capability === 'translation') {
-        const aligned = alignTranslations(chunk, validTranslations(chunk, data.translations));
+        const aligned = await translateChunk(chunk, data);
         record.sentences = record.sentences.map((s) => aligned.find((x) => x.id === s.id) || s);
         if (aligned.some((s) => !s.translation))
           throw new Error('本批译文有漏项或明显偏离原文，未保存有问题的译文。');

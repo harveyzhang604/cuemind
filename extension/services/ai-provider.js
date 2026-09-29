@@ -94,7 +94,7 @@ export async function asrHttpFailure(response) {
   const issue = details?.error || details;
   const noSpeech =
     response.status === 400 &&
-    /(?:no[-_. ]?(?:valid[-_. ]?)?(?:speech|voice)|speech (?:was )?not detected|silent audio|silence detected|无.{0,4}(?:人声|语音)|静音)/i.test(
+    /(?:ASR_RESPONSE_HAVE_NO_WORDS|SUCCESS_WITH_NO_VALID_FRAGMENT|SILENT_SPEECH|no[-_. ]?(?:valid[-_. ]?)?(?:speech|voice)|speech (?:was )?not detected|silent audio|silence detected|无.{0,4}(?:人声|语音)|静音)/i.test(
       `${issue?.code || ''} ${issue?.message || ''}`,
     );
   const code =
