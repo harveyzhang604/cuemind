@@ -16,6 +16,8 @@ async function prepare(m) {
     queue: Promise.resolve(),
     completed: 0,
     pending: 0,
+    plan: Array.isArray(m.plan) ? m.plan : [],
+    nextIndex: 0,
     stopping: false,
     finishing: false,
     errors: [],
@@ -45,15 +47,26 @@ async function prepare(m) {
 async function recordChunk(s) {
   if (s.stopping) return finish(s);
   try {
+    const segment = s.plan[s.nextIndex];
+    if (!segment) return stop(s);
     const current = await position(s);
     if (s.stopping) return finish(s);
     const chunks = [];
     const offset = current.time;
+    if (segment.end - offset < 1) return stop(s);
     const recorder = new MediaRecorder(s.stream, {
       mimeType: 'audio/webm;codecs=opus',
       audioBitsPerSecond: 64000,
     });
     s.recorder = recorder;
+    s.nextIndex++;
+    await send({
+      type: 'ASR_PROGRESS',
+      recordId: s.recordId,
+      segmentId: segment.id,
+      status: 'capturing',
+      start: offset,
+    });
     recorder.ondataavailable = (e) => {
       if (e.data.size) chunks.push(e.data);
     };
@@ -62,12 +75,25 @@ async function recordChunk(s) {
       clearTimeout(s.timer);
       const blob = new Blob(chunks, { type: 'audio/webm' }),
         discard = s.discardCurrent;
+      const endPosition = position(s).catch(() => null);
       s.discardCurrent = false;
       if (!discard && blob.size >= 1000 && !s.controller.signal.aborted) {
         s.pending++;
         s.queue = s.queue.then(async () => {
           if (s.controller.signal.aborted) return;
           try {
+            const endState = await endPosition;
+            const capturedEnd = Math.min(
+              segment.end,
+              Math.max(offset + 0.1, Number(endState?.time) || segment.end),
+            );
+            await send({
+              type: 'ASR_PROGRESS',
+              recordId: s.recordId,
+              segmentId: segment.id,
+              status: 'recognizing',
+              end: capturedEnd,
+            });
             let result;
             for (let attempt = 0; attempt < 2; attempt++) {
               try {
@@ -80,19 +106,37 @@ async function recordChunk(s) {
             const reply = await send({
               type: 'ASR_CHUNK',
               recordId: s.recordId,
+              segmentId: segment.id,
+              capturedEnd,
               segments: result.map((x) => ({ ...x, start: x.start + offset, end: x.end + offset })),
               completed: s.completed + 1,
             });
             if (!reply?.ok) throw new Error(reply?.error || '转写结果保存失败');
             s.completed++;
           } catch (e) {
-            if (!s.controller.signal.aborted)
+            if (!s.controller.signal.aborted) {
               s.errors.push(`${Math.floor(offset)} 秒附近：${e.message}`);
+              await send({
+                type: 'ASR_PROGRESS',
+                recordId: s.recordId,
+                segmentId: segment.id,
+                status: 'failed',
+                error: e.message,
+              }).catch(() => {});
+            }
           } finally {
             s.pending--;
           }
         });
       }
+      if (blob.size < 1000 && !discard && !s.controller.signal.aborted)
+        send({
+          type: 'ASR_PROGRESS',
+          recordId: s.recordId,
+          segmentId: segment.id,
+          status: 'failed',
+          error: '这一段没有可识别的音频',
+        }).catch(() => {});
       if (s.pending >= 3 && !s.stopping) {
         s.stopping = true;
         s.errors.push('转写速度落后于播放，已停止录音并处理已有音频。');
@@ -101,9 +145,12 @@ async function recordChunk(s) {
       else recordChunk(s);
     };
     recorder.start();
-    s.timer = setTimeout(() => {
-      if (recorder.state !== 'inactive') recorder.stop();
-    }, 60000);
+    s.timer = setTimeout(
+      () => {
+        if (recorder.state !== 'inactive') recorder.stop();
+      },
+      Math.max(1000, Math.round((segment.end - offset) * 1000)),
+    );
   } catch (e) {
     stop(s, { discard: true, reason: e.message });
   }
@@ -151,9 +198,16 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       reply({ ok: false, error: '录音尚未准备好' });
       return;
     }
-    recordChunk(state);
-    reply({ ok: true });
-    return;
+    const session = state;
+    recordChunk(session)
+      .then(() =>
+        reply({
+          ok: !session.stopping,
+          ...(session.stopping ? { error: session.errors.at(-1) || '音频采集未能开始' } : {}),
+        }),
+      )
+      .catch((error) => reply({ ok: false, error: error.message }));
+    return true;
   }
   if (m.type === 'STOP') {
     stop(state, m);

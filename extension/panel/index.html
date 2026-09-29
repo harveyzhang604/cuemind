@@ -142,9 +142,18 @@
           <div id="asr-box" class="notice" hidden>
             <strong>无字幕？识别视频音频</strong>
             <p id="capture-summary" role="status"></p>
+            <div id="asr-progress" hidden>
+              <p id="asr-plan-summary"></p>
+              <p id="asr-current-segment" role="status"></p>
+              <p id="asr-last-segment"></p>
+              <details class="asr-segment-details" open>
+                <summary>每段的识别结果</summary>
+                <div id="asr-segment-list"></div>
+              </details>
+            </div>
             <p>
-              直接提取当前视频正在播放的音频，由语音服务识别原文并生成时间戳。咪咕每次处理当前约 1
-              分钟，完成后回到起点查看双语字幕。中文译文由文本模型生成；已有结果保存在本机。
+              从当前播放位置开始，只采集实际播放的音频。首段约 30 秒，之后每段约 2
+              分钟；每段原文识别完成后会自动生成译文并显示双语字幕。可随时停止，已完成的段落保存在本机。
             </p>
             <div class="row">
               <button id="record" class="primary">识别当前视频音频</button
@@ -157,7 +166,7 @@
               <summary>音频识别与导入位置</summary>
               <p>
                 识别需要视频按 1×
-                实时播放，以便将语音和时间戳对齐；只提取音频，不保存视频画面。暂停或切换视频会结束本次识别，跳转或变速会丢弃当前音频块。识别其他位置前先移动播放进度；旧字幕与笔记仍保存在本机。
+                实时播放，以便将语音和时间戳对齐；只提取音频，不保存视频画面。暂停或切换视频会结束本次识别，跳转或变速会丢弃当前音频块。失败段会标出时间范围；将播放进度移到该段后可以重试。
               </p>
               <label
                 >导入音频在视频中的起点（秒）<input

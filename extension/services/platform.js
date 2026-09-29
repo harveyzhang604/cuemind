@@ -50,7 +50,7 @@ export async function inspectPage(trackId, expectedKey, signedPlayerUrl) {
       raw: [],
       source: 'migu_audio',
       warning:
-        '咪咕未提供可读取的字幕。点击「识别当前 1 分钟音频」，从正在播放的音频生成原文并自动补译；已有结果会从本机恢复。',
+        '咪咕未提供可读取的字幕。点击「识别当前视频音频」，从当前进度开始逐段识别播放音频并自动补译；每段进度和结果会显示在侧栏，已有结果会从本机恢复。',
     };
   }
   const sameLanguage = (a, b) =>

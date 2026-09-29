@@ -1,0 +1,118 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import { readFile } from 'node:fs/promises';
+import { planAsrSegments } from '../extension/core/asr-progress.js';
+
+test('offscreen recorder advances from the 30-second segment to the next two-minute segment', async () => {
+  const source = (
+    await readFile(new URL('../extension/offscreen/recorder.js', import.meta.url), 'utf8')
+  ).replace(/^import [^\n]+\n/, '');
+  const messages = [];
+  const timers = new Map();
+  let listener;
+  let playhead = 0;
+  let timerId = 0;
+  class Recorder {
+    state = 'inactive';
+    start() {
+      this.state = 'recording';
+    }
+    stop() {
+      this.state = 'inactive';
+      this.ondataavailable({ data: new Blob([new Uint8Array(1500)], { type: 'audio/webm' }) });
+      this.onstop();
+    }
+  }
+  class Audio {
+    createMediaStreamSource() {
+      return { connect() {} };
+    }
+    async resume() {}
+    async close() {}
+    get destination() {
+      return {};
+    }
+  }
+  const context = {
+    AbortController,
+    AudioContext: Audio,
+    Blob,
+    MediaRecorder: Recorder,
+    navigator: {
+      mediaDevices: {
+        getUserMedia: async () => ({
+          getAudioTracks: () => [{ addEventListener() {} }],
+          getTracks: () => [{ stop() {} }],
+        }),
+      },
+    },
+    setTimeout(fn, ms) {
+      const id = ++timerId;
+      timers.set(id, { fn, ms });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    transcribe: async () => [{ start: 0, end: 2, text: 'Recognized.' }],
+    chrome: {
+      runtime: {
+        id: 'fixture',
+        getURL: (path) => `chrome-extension://fixture/${path}`,
+        onMessage: {
+          addListener(fn) {
+            listener = fn;
+          },
+        },
+        async sendMessage(message) {
+          messages.push(message);
+          return message.type === 'CAPTURE_POSITION'
+            ? { ok: true, data: { time: playhead, duration: 150, paused: false, rate: 1 } }
+            : { ok: true };
+        },
+      },
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  const sender = { id: 'fixture', url: 'chrome-extension://fixture/background.js' };
+  const command = (type, fields = {}) =>
+    new Promise((resolve) => {
+      listener({ target: 'offscreen', type, recordId: 'video', ...fields }, sender, resolve);
+    });
+  const flush = async (predicate) => {
+    for (let i = 0; i < 60 && !predicate(); i++) await new Promise(setImmediate);
+    assert.ok(predicate(), 'recorder did not reach the expected stage');
+  };
+  const plan = planAsrSegments(0, 150);
+  assert.equal((await command('START', { streamId: 'stream', settings: {}, plan })).ok, true);
+  assert.equal((await command('RUN')).ok, true);
+  await flush(() => messages.some((m) => m.type === 'ASR_PROGRESS' && m.status === 'capturing'));
+  assert.equal([...timers.values()][0].ms, 30000);
+  playhead = 30;
+  [...timers.values()][0].fn();
+  await flush(() => messages.some((m) => m.type === 'ASR_CHUNK' && m.segmentId === plan[0].id));
+  await flush(() =>
+    messages.some(
+      (m) => m.type === 'ASR_PROGRESS' && m.segmentId === plan[1].id && m.status === 'capturing',
+    ),
+  );
+  assert.equal([...timers.values()][0].ms, 120000);
+  playhead = 150;
+  [...timers.values()][0].fn();
+  await flush(() => messages.some((m) => m.type === 'ASR_FINISHED'));
+  const chunks = messages.filter((m) => m.type === 'ASR_CHUNK');
+  assert.deepEqual(
+    chunks.map((m) => [m.segmentId, m.segments[0].start]),
+    [
+      [plan[0].id, 0],
+      [plan[1].id, 30],
+    ],
+  );
+  assert.deepEqual(
+    chunks.map((m) => m.capturedEnd),
+    [30, 150],
+  );
+  assert.equal(messages.at(-1).type, 'ASR_FINISHED');
+});

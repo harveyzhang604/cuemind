@@ -3060,6 +3060,56 @@ main,
   color: var(--green);
   font-weight: 600;
 }
+#asr-progress {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+#asr-progress p {
+  margin: 0;
+}
+#asr-current-segment {
+  color: var(--ink);
+  font-weight: 600;
+}
+#asr-last-segment:empty {
+  display: none;
+}
+#asr-last-segment {
+  color: var(--muted);
+}
+.asr-segment-details {
+  margin-top: 7px;
+}
+.asr-segment-details summary {
+  cursor: pointer;
+  color: var(--green);
+}
+#asr-segment-list {
+  max-height: 230px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+.asr-segment {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.asr-segment strong {
+  font-weight: 600;
+  text-align: right;
+}
+.asr-segment[data-status='failed'] strong,
+.asr-segment[data-status='translation-failed'] strong,
+.asr-segment[data-status='interrupted'] strong {
+  color: #a14c34;
+}
 #capture-controls {
   flex-wrap: wrap;
   gap: 8px;

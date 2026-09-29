@@ -57,6 +57,7 @@
 !/extension/background.js
 !/extension/content/player.js
 !/extension/core/backup.js
+!/extension/core/asr-progress.js
 !/extension/core/conversation.js
 !/extension/core/export.js
 !/extension/core/focus.js
@@ -108,6 +109,8 @@
 !/scripts/public-files.json
 !/scripts/release-policy.mjs
 !/tests/audit.test.js
+!/tests/asr_progress.test.js
+!/tests/asr_recorder.test.js
 !/tests/bilibili_flow.py
 !/tests/bilibili_follow.py
 !/tests/bilibili_quick_note.py

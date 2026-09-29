@@ -106,7 +106,7 @@ Its key is separate from the text-model key. CueMind requests existing captions 
 
 Configure Groq, OpenAI, or a timestamp-capable Whisper-compatible service in the speech section of settings. Groq keys are available from the [Groq console](https://console.groq.com/keys).
 
-Choose **⋯ → 导入字幕与音频** (Import subtitles and audio) to import SRT/VTT, upload an audio file, or choose **识别当前视频音频** (Transcribe current video audio). CueMind captures only the playing audio, not video frames, and sends it to your selected transcription service. Playback runs at 1× so the transcript aligns with video timestamps. Transcription starts only when you request it; provider charges may apply.
+Choose **⋯ → 导入字幕与音频** (Import subtitles and audio) to import SRT/VTT, upload an audio file, or choose **识别当前视频音频** (Transcribe current video audio). CueMind captures only the playing audio, not video frames, and sends it to your selected transcription service. Playback runs at 1× so the transcript aligns with video timestamps. Transcription starts only when you request it; provider charges may apply. The panel plans the remaining video in an initial roughly 30-second segment followed by roughly two-minute segments, with status for each.
 
 Text models, Supadata, and transcription use separate settings and keys. A video with available platform captions usually does not need a speech service.
 
@@ -114,9 +114,9 @@ Text models, Supadata, and transcription use separate settings and keys. A video
 
 ### Migu sports videos
 
-On a playable Migu sports programme, select the English audio programme, click the CueMind toolbar icon, then **读取当前视频 → 识别当前 1 分钟音频** (Read current video → Transcribe the current minute). The tested event page did not expose a readable subtitle track, so CueMind transcribes the playing audio with timestamps. With a text model configured, it adds Chinese translations and shows bilingual captions over the video. It returns to the segment start for review. Continuing from an already transcribed position skips to the end of the saved audio. Captions and matching translations are stored locally per programme.
+On a playable Migu sports programme, select the English audio programme, click the CueMind toolbar icon, then **读取当前视频 → 从当前位置连续识别** (Read current video → Transcribe continuously from the playhead). When no readable subtitle track is available, CueMind transcribes audio as it plays: the first segment is about 30 seconds and later segments are about two minutes each. The side panel lists the planned ranges through the end of the video, the current range, and each range's transcription and translation status or error. With a text model configured, successful source segments are translated automatically and bilingual captions appear progressively in the panel and over the video. Completed captions and translations remain in local storage. Continuing skips contiguous completed audio without skipping failed gaps. Programmes are stored separately.
 
-The player must be able to play audio, and transcription takes about as long as the segment plays. If Migu blocks playback because of copyright or region restrictions, CueMind cannot obtain that audio. You can import an audio or subtitle file you already have instead.
+The player must play at 1× speed. Unplayed audio cannot be transcribed in advance. Pausing, seeking, changing speed, or switching videos ends the current capture while preserving completed segments. Failed ranges show their time and error so you can seek back and retry. If Migu blocks playback because of copyright or region restrictions, CueMind cannot obtain that audio. You can import an audio or subtitle file you already have instead.
 
 ## Features
 

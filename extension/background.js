@@ -22,6 +22,7 @@ import * as db from './storage/db.js';
 import { validateSettings, restoreSettings } from './services/settings.js';
 import { validateBackup } from './core/backup.js';
 import { keyFromUrl, matchesVideoUrl } from './core/video.js';
+import { planAsrSegments, skipRecognizedAudio } from './core/asr-progress.js';
 const tasks = new Map();
 let capture = null,
   restoring = false;
@@ -821,7 +822,7 @@ async function route(m) {
   if (m.type === 'CAPTURE_START') {
     if (capture) throw new Error('已有音频识别正在进行');
     assertAvailable(m.recordId);
-    const session = { tabId: m.tabId, started: false };
+    const session = { id: crypto.randomUUID(), tabId: m.tabId, started: false };
     capture = session;
     try {
       const original = await requireRecord(m.recordId),
@@ -831,21 +832,27 @@ async function route(m) {
       if (state.isAd) throw new Error('正在播放广告，请等正片开始后再识别音频。');
       if (!Number.isFinite(state.duration) || state.time >= state.duration)
         throw new Error('请先将视频移动到要转写的位置');
-      session.preview = original.videoInfo.platform === 'migu';
-      if (
-        session.preview &&
-        original.transcriptMeta.source?.startsWith('whisper') &&
-        original.rawCaptions?.length
-      ) {
+      session.migu = original.videoInfo.platform === 'migu';
+      const previousAsr =
+        original.transcriptMeta.source?.startsWith('whisper') && original.rawCaptions?.length;
+      if (previousAsr) {
         const first = Math.min(...original.rawCaptions.map((cue) => cue.start));
         const last = Math.max(...original.rawCaptions.map((cue) => cue.end));
-        const completedThrough = Math.max(last, Number(original.transcriptMeta.capturedUntil) || 0);
-        if (state.time >= first - 1 && state.time < completedThrough - 0.25) {
-          if (completedThrough + 0.2 >= state.duration)
+        const segments = original.transcriptMeta.asrSegments;
+        const completedThrough =
+          Array.isArray(segments) && segments.length
+            ? skipRecognizedAudio(state.time, segments)
+            : state.time >= first - 1 &&
+                state.time <
+                  Math.max(last, Number(original.transcriptMeta.capturedUntil) || 0) - 0.25
+              ? Math.max(last, Number(original.transcriptMeta.capturedUntil) || 0) + 0.2
+              : state.time;
+        if (completedThrough > state.time + 0.1) {
+          if (completedThrough >= state.duration - 2)
             throw new Error('视频末尾已识别，请选择其他未识别的片段。');
           await player(m.tabId, {
             action: 'seek',
-            time: completedThrough + 0.2,
+            time: completedThrough,
             videoKey: original.videoKey,
           });
           const deadline = Date.now() + 8000;
@@ -854,7 +861,7 @@ async function route(m) {
             if (
               !state.seeking &&
               (state.readyState == null || state.readyState >= 2) &&
-              Math.abs(state.time - (completedThrough + 0.2)) < 0.75
+              Math.abs(state.time - completedThrough) < 0.75
             )
               break;
             if (Date.now() >= deadline) throw new Error('视频跳转后未准备好音频，请稍后重试。');
@@ -867,12 +874,14 @@ async function route(m) {
       session.videoKey = original.videoKey;
       session.startTime = state.time;
       session.translationSignature = translationSignature(cfg);
-      session.seedRecord =
-        session.preview &&
-        original.transcriptMeta.source?.startsWith('whisper') &&
-        original.rawCaptions?.length
-          ? original
-          : null;
+      session.seedRecord = previousAsr ? original : null;
+      session.settings = cfg;
+      session.translationAttempted = new Set();
+      session.translationController = new AbortController();
+      session.plan = planAsrSegments(state.time, state.duration, () => crypto.randomUUID()).map(
+        (segment) => ({ ...segment, sessionId: session.id }),
+      );
+      if (!session.plan.length) throw new Error('视频末尾没有足够音频可识别。');
       await player(m.tabId, { action: 'pause', videoKey: original.videoKey });
       await player(m.tabId, { action: 'capture-lock', locked: true, videoKey: original.videoKey });
       if (!(await chrome.offscreen.hasDocument()))
@@ -896,20 +905,33 @@ async function route(m) {
         language: 'auto',
         trackId: `recording-${crypto.randomUUID()}`,
       });
-      if (session.preview) {
-        if (session.seedRecord) {
-          record.rawCaptions = structuredClone(original.rawCaptions);
-          record.sentences = structuredClone(original.sentences);
-          record.paragraphs = structuredClone(original.paragraphs);
-          record.transcriptMeta.capturedUntil = original.transcriptMeta.capturedUntil;
-          recoverEquivalentLearning(record, [original], {
-            translationSignature: session.translationSignature,
-          });
-        }
+      if (session.seedRecord) {
+        record.rawCaptions = structuredClone(original.rawCaptions);
+        record.sentences = structuredClone(original.sentences);
+        record.paragraphs = structuredClone(original.paragraphs);
+        record.transcriptMeta.capturedUntil = original.transcriptMeta.capturedUntil;
+        recoverEquivalentLearning(record, [original], {
+          translationSignature: session.translationSignature,
+        });
+      }
+      record.transcriptMeta.asrSegments = [
+        ...(Array.isArray(original.transcriptMeta.asrSegments)
+          ? original.transcriptMeta.asrSegments.map((segment) =>
+              ['pending', 'capturing', 'recognizing', 'translating'].includes(segment.status)
+                ? { ...segment, status: 'interrupted', error: '上次识别已中断' }
+                : segment,
+            )
+          : []),
+        ...session.plan,
+      ];
+      record.transcriptMeta.asrSessionId = session.id;
+      if (session.migu) {
         selectFocusConfig(
           record,
           original.focusConfig || { overlay: true, overlayLanguage: 'bilingual' },
         );
+      } else if (original.focusConfig) {
+        selectFocusConfig(record, original.focusConfig);
       }
       session.record = record;
       const reply = await chrome.runtime.sendMessage({
@@ -918,6 +940,7 @@ async function route(m) {
         streamId,
         settings: cfg,
         recordId: record.id,
+        plan: session.plan,
       });
       if (!reply?.ok) throw new Error(reply?.error || '音频识别启动失败');
       await store(record);
@@ -936,10 +959,6 @@ async function route(m) {
       });
       if (!run?.ok) throw new Error(run?.error || '音频识别启动失败');
       session.started = true;
-      if (session.preview)
-        session.timer = setTimeout(() => {
-          if (capture === session) stopCapture().catch(() => {});
-        }, 60000);
       return record;
     } catch (e) {
       await chrome.runtime
@@ -973,6 +992,7 @@ async function stopCapture(options = {}) {
   if (!s) return;
   if (s.stopping && !options.cancel) return;
   s.stopping = true;
+  if (options.cancel) s.translationController?.abort();
   clearTimeout(s.timer);
   try {
     const result = await chrome.runtime.sendMessage({
@@ -991,6 +1011,98 @@ async function stopCapture(options = {}) {
       notify({ event: 'asr-finished', recordId: s.record.id, error: e.message });
     }
   }
+}
+function captureWrite(session, work) {
+  const next = (session.writeQueue || Promise.resolve()).then(work);
+  session.writeQueue = next.catch(() => {});
+  return next;
+}
+function captureSegment(session, id) {
+  return session.record?.transcriptMeta.asrSegments?.find((segment) => segment.id === id);
+}
+function announceAsrProgress(session) {
+  notify({
+    event: 'asr-progress',
+    recordId: session.record.id,
+    segments: structuredClone(session.record.transcriptMeta.asrSegments),
+  });
+}
+const modelConfigured = (cfg) =>
+  !!cfg.apiKey || ['localhost', '127.0.0.1', '[::1]'].includes(new URL(cfg.baseUrl).hostname);
+async function translateCaptureSegment(session, segmentId) {
+  if (!modelConfigured(session.settings)) return;
+  await session.writeQueue;
+  const segment = captureSegment(session, segmentId);
+  if (!segment || segment.status !== 'source-ready') return;
+  await captureWrite(session, async () => {
+    segment.status = 'translating';
+    await store(session.record);
+    announceAsrProgress(session);
+  });
+  const errors = [];
+  for (;;) {
+    const snapshot = structuredClone(session.record);
+    const missing = snapshot.sentences.filter((sentence) => {
+      const identity = `${sentence.id}:${sentence.rawText}`;
+      return (
+        sentence.start >= segment.start - 0.75 &&
+        sentence.start < segment.end + 0.75 &&
+        !sentence.translation &&
+        !session.translationAttempted.has(identity)
+      );
+    });
+    if (!missing.length) break;
+    const selected = missing.slice(0, 70);
+    selected.forEach((sentence) =>
+      session.translationAttempted.add(`${sentence.id}:${sentence.rawText}`),
+    );
+    try {
+      const result = await runTask(
+        snapshot,
+        'translation',
+        session.settings,
+        { selectedIds: selected.map((sentence) => sentence.id) },
+        session.translationController.signal,
+        async () => {},
+        () => {},
+      );
+      errors.push(...(result.errors || []).map((row) => row.error));
+      await captureWrite(session, async () => {
+        for (const translated of snapshot.sentences.filter((row) => row.translation)) {
+          const current = session.record.sentences.find(
+            (row) => row.id === translated.id && row.rawText === translated.rawText,
+          );
+          if (!current || current.translation) continue;
+          current.translation = translated.translation;
+          session.record.translationCaches ||= {};
+          const cache = (session.record.translationCaches[session.translationSignature] ||= {});
+          cache[current.id] = { source: current.rawText, text: current.translation };
+        }
+        session.record.tasks = {
+          ...session.record.tasks,
+          translation: { signature: session.translationSignature, done: [], failed: [] },
+        };
+        await store(session.record);
+        notify({ event: 'asr', recordId: session.record.id, record: session.record });
+      });
+    } catch (error) {
+      if (session.translationController.signal.aborted) break;
+      errors.push(error.message);
+    }
+  }
+  await captureWrite(session, async () => {
+    const current = captureSegment(session, segmentId);
+    if (!current) return;
+    const rows = session.record.sentences.filter(
+      (sentence) => sentence.start >= current.start - 0.75 && sentence.start < current.end + 0.75,
+    );
+    current.status =
+      errors.length || rows.some((row) => !row.translation) ? 'translation-failed' : 'done';
+    if (errors.length) current.error = errors[0].slice(0, 240);
+    current.sentenceCount = rows.length;
+    await store(session.record);
+    announceAsrProgress(session);
+  });
 }
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (capture?.tabId === tabId)
@@ -1073,21 +1185,94 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       .catch((e) => reply({ ok: false, error: e.message }));
     return true;
   }
+  if (m.type === 'ASR_PROGRESS' && offscreen) {
+    (async () => {
+      const s = capture;
+      if (s?.record?.id !== m.recordId) throw new Error('音频识别会话已结束');
+      if (!['capturing', 'recognizing', 'failed'].includes(m.status))
+        throw new Error('音频识别状态无效');
+      await captureWrite(s, async () => {
+        const segment = captureSegment(s, m.segmentId);
+        if (!segment) throw new Error('音频片段不存在');
+        segment.status = m.status;
+        if (Number.isFinite(m.start) && m.start >= 0) segment.start = m.start;
+        if (Number.isFinite(m.end) && m.end > segment.start) segment.end = m.end;
+        if (m.status === 'failed') segment.error = String(m.error || '识别失败').slice(0, 240);
+        await store(s.record);
+        announceAsrProgress(s);
+      });
+    })()
+      .then(() => reply({ ok: true }))
+      .catch((e) => reply({ ok: false, error: e.message }));
+    return true;
+  }
   if (m.type === 'ASR_CHUNK' && offscreen) {
     (async () => {
-      if (!capture?.record || capture.record.id !== m.recordId) throw new Error('录音会话已结束');
-      const r = capture.record;
-      const extra = normalizeCaptions(m.segments, 'whisper');
-      r.rawCaptions = normalizeCaptions([...r.rawCaptions, ...extra], 'whisper');
-      r.sentences = localSentences(r.rawCaptions);
-      r.paragraphs = paragraphs(r.sentences);
-      if (capture.seedRecord)
-        recoverEquivalentLearning(r, [capture.seedRecord], {
-          translationSignature: capture.translationSignature,
+      const s = capture;
+      if (s?.record?.id !== m.recordId) throw new Error('音频识别会话已结束');
+      await captureWrite(s, async () => {
+        const r = s.record;
+        const segment = captureSegment(s, m.segmentId);
+        if (!segment) throw new Error('音频片段不存在');
+        const previous = {
+          ...r,
+          id: `${r.id}:previous`,
+          sentences: r.sentences,
+          translationCaches: structuredClone(r.translationCaches || {}),
+          tasks: structuredClone(r.tasks || {}),
+        };
+        const extra = normalizeCaptions(m.segments, 'whisper');
+        r.rawCaptions = normalizeCaptions([...r.rawCaptions, ...extra], 'whisper');
+        r.sentences = localSentences(r.rawCaptions);
+        r.paragraphs = paragraphs(r.sentences);
+        recoverEquivalentLearning(r, [previous, ...(s.seedRecord ? [s.seedRecord] : [])], {
+          translationSignature: s.translationSignature,
         });
-      await store(r);
-      if (capture?.record.id === r.id) capture.completed = m.completed;
-      notify({ event: 'asr', recordId: r.id, record: r, completed: m.completed });
+        const plannedEnd = segment.end;
+        const capturedEnd =
+          Number.isFinite(m.capturedEnd) && m.capturedEnd > segment.start
+            ? Math.min(plannedEnd, m.capturedEnd)
+            : plannedEnd;
+        if (plannedEnd - capturedEnd >= 2) {
+          const index = r.transcriptMeta.asrSegments.indexOf(segment);
+          r.transcriptMeta.asrSegments.splice(index + 1, 0, {
+            ...segment,
+            id: crypto.randomUUID(),
+            start: capturedEnd,
+            end: plannedEnd,
+            status: 'interrupted',
+            error: '音频尚未播放，可从此位置继续',
+          });
+        }
+        segment.end = capturedEnd;
+        segment.status = extra.length ? 'source-ready' : 'no-speech';
+        segment.sentenceCount = r.sentences.filter(
+          (sentence) =>
+            sentence.start >= segment.start - 0.75 && sentence.start < segment.end + 0.75,
+        ).length;
+        r.transcriptMeta.capturedUntil = Math.max(
+          Number(r.transcriptMeta.capturedUntil) || 0,
+          segment.end,
+        );
+        await store(r);
+        if (capture?.record.id === r.id) capture.completed = m.completed;
+        notify({ event: 'asr', recordId: r.id, record: r, completed: m.completed });
+        announceAsrProgress(s);
+      });
+      s.translationQueue = (s.translationQueue || Promise.resolve())
+        .then(() => translateCaptureSegment(s, m.segmentId))
+        .catch(async (error) => {
+          await captureWrite(s, async () => {
+            const segment = captureSegment(s, m.segmentId);
+            if (segment && segment.status === 'translating') {
+              segment.status = 'translation-failed';
+              segment.error = String(error.message || error).slice(0, 240);
+              await store(s.record);
+              announceAsrProgress(s);
+            }
+          });
+          notify({ event: 'asr-translation-error', recordId: s.record.id, error: error.message });
+        });
     })()
       .then(() => reply({ ok: true }))
       .catch((e) => reply({ ok: false, error: e.message }));
@@ -1097,26 +1282,22 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     (async () => {
       const s = capture;
       if (s?.record?.id !== m.recordId) return;
+      await s.translationQueue;
+      await s.writeQueue;
       if (m.error || m.canceled) {
         s.record.transcriptMeta.partial = true;
         s.record.transcriptMeta.error = m.error || (m.canceled ? '剩余转写已取消' : '');
         await store(s.record);
       }
-      await releaseCapture(s);
-      if (s.preview && !m.error && !m.canceled) {
-        const finalState = await player(s.tabId, { action: 'state', videoKey: s.videoKey }).catch(
-          () => null,
-        );
-        if (finalState?.time >= s.startTime) {
-          s.record.transcriptMeta.capturedUntil = finalState.time;
-          await store(s.record);
+      for (const segment of s.record.transcriptMeta.asrSegments || [])
+        if (['capturing', 'recognizing', 'translating'].includes(segment.status)) {
+          segment.status = 'interrupted';
+          segment.error ||= '识别中断，可从此位置重试';
         }
-        await player(s.tabId, { action: 'pause', videoKey: s.videoKey }).catch(() => {});
-        await player(s.tabId, { action: 'seek', time: s.startTime, videoKey: s.videoKey }).catch(
-          () => {},
-        );
-      }
+      await store(s.record);
+      await releaseCapture(s);
       if (capture === s) capture = null;
+      announceAsrProgress(s);
       notify({ event: 'asr-finished', recordId: m.recordId, error: m.error, canceled: m.canceled });
     })()
       .then(() => reply({ ok: true }))

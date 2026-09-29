@@ -2379,6 +2379,8 @@ $('#audio').onchange = guard(async (e) => {
     });
     if (gen !== generation) return;
     record = result;
+    mode = 'bilingual';
+    syncModeControls();
     await hydrate();
     await bindPlayer();
     status('音频转写完成。');
@@ -2416,6 +2418,8 @@ $('#record').onclick = guard(async () => {
     renderCapture();
     if (gen !== generation) return;
     record = result;
+    mode = 'bilingual';
+    syncModeControls();
     notes = [];
     chats = [];
     selectedIds = [];
@@ -2427,6 +2431,67 @@ $('#record').onclick = guard(async () => {
     if (gen === generation) busy = false;
   }
 });
+function renderAsrSegments() {
+  const all = record?.transcriptMeta.asrSegments || [];
+  const sessionId = record?.transcriptMeta.asrSessionId;
+  const segments = sessionId ? all.filter((segment) => segment.sessionId === sessionId) : all;
+  $('#asr-progress').hidden = !segments.length;
+  if (!segments.length) return;
+  const originalReady = segments.filter((segment) =>
+    ['source-ready', 'translating', 'done', 'translation-failed'].includes(segment.status),
+  ).length;
+  const silent = segments.filter((segment) => segment.status === 'no-speech').length;
+  const bilingual = segments.filter((segment) => segment.status === 'done').length;
+  const failed = segments.filter((segment) =>
+    ['failed', 'translation-failed', 'interrupted'].includes(segment.status),
+  ).length;
+  $('#asr-plan-summary').textContent =
+    `计划 ${segments.length} 段 · 原文成功 ${originalReady}${silent ? ` · 无语音 ${silent}` : ''} · 双语完成 ${bilingual} · 失败 ${failed}`;
+  const labels = {
+    pending: '未开始',
+    capturing: '正在采集音频',
+    recognizing: '正在识别原文',
+    'source-ready': '原文成功，等待翻译',
+    translating: '正在生成译文',
+    done: '双语成功',
+    'translation-failed': '原文成功，译文失败',
+    'no-speech': '已识别，无可辨语音',
+    failed: '识别失败',
+    interrupted: '已中断',
+  };
+  const activeSegment = segments.findLast((segment) =>
+    ['capturing', 'recognizing', 'translating'].includes(segment.status),
+  );
+  const nextSegment = segments.find((segment) => segment.status === 'pending');
+  $('#asr-current-segment').textContent = activeSegment
+    ? `当前 ${formatTime(activeSegment.start)}–${formatTime(activeSegment.end)}：${labels[activeSegment.status]}`
+    : recording && nextSegment
+      ? `下一段 ${formatTime(nextSegment.start)}–${formatTime(nextSegment.end)}：等待播放`
+      : '当前没有正在处理的片段；已完成结果保存在本机。';
+  const lastResult = segments.findLast((segment) =>
+    ['source-ready', 'done', 'translation-failed', 'failed', 'interrupted', 'no-speech'].includes(
+      segment.status,
+    ),
+  );
+  $('#asr-last-segment').textContent = lastResult
+    ? `已处理区间 ${formatTime(lastResult.start)}–${formatTime(lastResult.end)}：${labels[lastResult.status]}${lastResult.error ? ` · ${lastResult.error}` : ''}`
+    : '';
+  const list = $('#asr-segment-list');
+  list.replaceChildren();
+  for (const [index, segment] of segments.entries()) {
+    const row = el('div', 'asr-segment');
+    row.dataset.status = segment.status;
+    row.append(
+      el('span', '', `${index + 1}. ${formatTime(segment.start)}–${formatTime(segment.end)}`),
+      el(
+        'strong',
+        '',
+        `${labels[segment.status] || segment.status}${segment.error ? ` · ${segment.error}` : ''}`,
+      ),
+    );
+    list.append(row);
+  }
+}
 function renderCapture() {
   let bar = $('#capture-controls');
   if (!bar) {
@@ -2446,6 +2511,7 @@ function renderCapture() {
     asr && raw.length
       ? `已生成 ${span} 的原文字幕，共 ${record.sentences.length} 句。${record.transcriptMeta.partial ? '部分转写未完成，已有字幕已保留。' : ''}`
       : '';
+  renderAsrSegments();
   if (mine || asr) $('#asr-box').hidden = false;
   $('#record').disabled = recording && (!mine || !!captureInfo?.stopping);
   $('#audio').disabled = recording;
@@ -2458,9 +2524,7 @@ function renderCapture() {
           : '结束音频采集并生成字幕'
         : asr && raw.length
           ? '从当前进度继续识别'
-          : record?.videoInfo.platform === 'migu'
-            ? '识别当前 1 分钟音频'
-            : '识别当前视频音频';
+          : '从当前位置连续识别';
   if (!recording) return;
   const completed = captureInfo?.completed;
   const progress = Number.isFinite(completed) ? ` · 已完成 ${completed} 批` : '';
@@ -2693,6 +2757,12 @@ if (ext) {
       load();
     if (m.event === 'note-saved' && (m.recordId === record?.id || $('#note-scope').value === 'all'))
       hydrate().catch(error);
+    if (m.event === 'asr-progress' && m.recordId === record?.id) {
+      record.transcriptMeta.asrSegments = m.segments;
+      renderCapture();
+    }
+    if (m.event === 'asr-translation-error' && m.recordId === record?.id)
+      status(`原文已保存，自动翻译失败：${m.error}`, true);
     if (m.event === 'asr' && m.recordId === record?.id) {
       record = m.record;
       if (captureInfo) captureInfo.completed = m.completed;
