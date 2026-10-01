@@ -153,3 +153,37 @@ export function timestampUrl(v, t) {
     return '';
   }
 }
+
+// Alternate ASR passes can disagree in wording while describing the same audio.
+// Require strongly overlapping timing and similar wording; never dedupe by the
+// displayed whole-second timestamp alone.
+export function deduplicateAsrCaptions(raw) {
+  const kept = [],
+    removed = [];
+  const words = (text) =>
+    new Set(
+      String(text || '')
+        .toLowerCase()
+        .match(/[\p{L}\p{N}]+/gu) || [],
+    );
+  for (const cue of [...raw].sort((a, b) => a.start - b.start)) {
+    const tokens = words(cue.text);
+    const duplicate = kept.findLast((old) => {
+      const overlap = Math.min(old.end, cue.end) - Math.max(old.start, cue.start);
+      const shortest = Math.min(old.end - old.start, cue.end - cue.start);
+      if (shortest <= 0 || overlap / shortest < 0.75 || Math.abs(old.start - cue.start) > 0.8)
+        return false;
+      const previous = words(old.text);
+      const shared = [...tokens].filter((word) => previous.has(word)).length;
+      const similarity = shared / Math.max(tokens.size, previous.size, 1);
+      const sameInterval =
+        Math.abs(old.start - cue.start) <= 0.25 &&
+        Math.abs(old.end - cue.end) <= 0.25 &&
+        shortest >= 1;
+      return similarity >= 0.6 || (sameInterval && shared >= 3 && similarity >= 0.25);
+    });
+    if (duplicate) removed.push(cue);
+    else kept.push(cue);
+  }
+  return { kept, removed };
+}

@@ -8,6 +8,7 @@ import WBI from './services/wbi.js';
 import { inspectPage, canReuseTranscript } from './services/platform.js';
 import {
   normalizeCaptions,
+  deduplicateAsrCaptions,
   parseJSON3,
   splitAsrCaptions,
   splitTimedCaptions,
@@ -211,9 +212,10 @@ async function requireRecord(id) {
   if (!record) throw new Error('请先读取或导入字幕。');
   const translated = await migrateMiguAsrTranslations(record);
   const split = migrateMiguAsrSentences(record);
+  const deduplicated = migrateMiguAsrDuplicates(record);
   const aligned = reuseAlignedMiguAsrTranslations(record);
   const reconciled = reconcileAsrTranslationStatuses(record);
-  if (translated || split || aligned || reconciled) await store(record);
+  if (translated || split || deduplicated || aligned || reconciled) await store(record);
   return record;
 }
 function asrSentences(record, segment) {
@@ -321,6 +323,34 @@ function migrateMiguAsrSentences(record) {
       if (segment.status === 'done' && missing(segment)) segment.status = 'source-ready';
   }
   record.transcriptMeta.sentenceRevision = 4;
+  return true;
+}
+function migrateMiguAsrDuplicates(record) {
+  if (
+    record.videoInfo?.platform !== 'migu' ||
+    !record.transcriptMeta?.source?.startsWith('whisper')
+  )
+    return false;
+  const { kept, removed } = deduplicateAsrCaptions(record.rawCaptions || []);
+  if (!removed.length) return false;
+  // Retain originals locally so a conservative merge remains recoverable.
+  record.transcriptMeta.duplicateCaptionBackup ||= [];
+  record.transcriptMeta.duplicateCaptionBackup.push({
+    savedAt: Date.now(),
+    rawCaptions: removed,
+    sentences: record.sentences.filter((sentence) =>
+      sentence.sourceIds?.some((id) => removed.some((cue) => cue.id === id)),
+    ),
+  });
+  const before = record.sentences;
+  record.rawCaptions = kept;
+  record.sentences = localSentences(kept);
+  for (const sentence of record.sentences) {
+    const old = before.find((item) => item.id === sentence.id && item.rawText === sentence.rawText);
+    if (old) Object.assign(sentence, old);
+  }
+  record.paragraphs = paragraphs(record.sentences);
+  reconcileAsrTranslationStatuses(record);
   return true;
 }
 async function migrateMiguAsrTranslations(record) {
@@ -638,6 +668,7 @@ async function route(m) {
       const cfg = await settings();
       const migratedTranslations = await migrateMiguAsrTranslations(result.record);
       const migratedSentences = migrateMiguAsrSentences(result.record);
+      const deduplicated = migrateMiguAsrDuplicates(result.record);
       const alignedTranslations = reuseAlignedMiguAsrTranslations(result.record);
       const recovered = recoverEquivalentLearning(result.record, await db.all('videos'), {
         translationSignature: translationSignature(cfg, result.record),
@@ -645,6 +676,7 @@ async function route(m) {
       if (
         migratedTranslations ||
         migratedSentences ||
+        deduplicated ||
         alignedTranslations ||
         recovered.translations ||
         recovered.focus ||
@@ -1451,6 +1483,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
               }))
           : recognized;
         r.rawCaptions = [...r.rawCaptions, ...extra].sort((a, b) => a.start - b.start);
+        migrateMiguAsrDuplicates(r);
         r.sentences = localSentences(r.rawCaptions);
         r.paragraphs = paragraphs(r.sentences);
         recoverEquivalentLearning(r, [previous, ...(s.seedRecord ? [s.seedRecord] : [])], {

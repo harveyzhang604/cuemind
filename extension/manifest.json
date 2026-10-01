@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CueMind · 视频精读与复听",
-  "version": "1.0.46",
+  "version": "1.0.47",
   "description": "YouTube、Bilibili 与咪咕视频字幕学习：双语阅读、精准复听、AI 学习地图和本地笔记。",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "storage", "activeTab", "scripting", "offscreen", "tabCapture"],
