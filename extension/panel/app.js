@@ -905,6 +905,7 @@ function receivePlayerState(m) {
 
   $('#stop').hidden = !m.session && !smart;
   time = m.time;
+  updateCaptureEndState(m.duration);
   maybeTranslateVideo();
   const marker = $('.timeline-marker');
   if (marker)
@@ -2699,6 +2700,17 @@ function renderAsrSegments() {
     list.append(row);
   }
 }
+function updateCaptureEndState(duration = record?.videoInfo?.duration) {
+  if (recording || !record) return;
+  const atEnd =
+    Number.isFinite(duration) && duration > 0 && Math.floor(time) >= Math.floor(duration);
+  $('#record').disabled = busy || backgroundBusy || atEnd;
+  $('#record').textContent = atEnd
+    ? '已到视频结尾'
+    : record.transcriptMeta.source?.includes('whisper') && record.rawCaptions?.length
+      ? '从当前进度继续识别'
+      : '从当前位置连续识别';
+}
 function renderCapture() {
   let bar = $('#capture-controls');
   if (!bar) {
@@ -2744,7 +2756,10 @@ function renderCapture() {
         : asr && raw.length
           ? '从当前进度继续识别'
           : '从当前位置连续识别';
-  if (!recording) return;
+  if (!recording) {
+    updateCaptureEndState();
+    return;
+  }
   const completed = captureInfo?.completed;
   const progress = Number.isFinite(completed) ? ` · 已完成 ${completed} 批` : '';
   bar.append(

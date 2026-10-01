@@ -126,6 +126,18 @@ export function buildAsrTimeline(duration, savedSegments = [], currentSessionId 
       });
     }
   }
+  // The player displays whole seconds, while capture metadata may retain
+  // fractions. Do not offer an unrecordable "end–end" retry after a completed
+  // final interval. Keep real failures and gaps elsewhere in the video.
+  const lastRecognized = timeline.findLastIndex((segment) => hasOriginal(segment));
+  if (lastRecognized >= 0 && lastRecognized < timeline.length - 1) {
+    const completedEnd = timeline[lastRecognized].end;
+    if (
+      Math.floor(completedEnd) === Math.floor(duration) &&
+      timeline.slice(lastRecognized + 1).every((segment) => segment.status === 'pending')
+    )
+      timeline.splice(lastRecognized + 1);
+  }
   return timeline;
 }
 
