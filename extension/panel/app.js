@@ -393,6 +393,8 @@ async function load(refresh = false, trackId) {
     await restoreReading(gen);
     if (!backgroundBusy)
       status(data.needASR ? data.warning || '没有找到可用字幕，可以导入字幕或生成 ASR 字幕。' : '');
+    if (['youtube', 'bilibili'].includes(record.videoInfo.platform))
+      rpc('SAVE_VIDEO_AUDIO', { recordId: record.id, tabId: tab.id }).catch(() => {});
     await bindPlayer();
     if (data.recovered?.translations || data.recovered?.focus)
       toast(
@@ -3027,6 +3029,8 @@ if (ext) {
       load();
     if (m.event === 'note-saved' && (m.recordId === record?.id || $('#note-scope').value === 'all'))
       hydrate().catch(error);
+    if (['audio-saved', 'audio-save-failed'].includes(m.event) && $('#local-audio-library').open)
+      refreshAudioLibrary().catch(error);
     if (m.event === 'asr-progress' && m.recordId === record?.id) {
       record.transcriptMeta.asrSegments = m.segments;
       renderCapture();
@@ -4150,7 +4154,7 @@ async function refreshAudioLibrary() {
   const entries = await rpc('AUDIO_LIBRARY');
   list.replaceChildren();
   if (!entries.length) {
-    list.textContent = '尚无本地音频。从视频开始音频识别后，会自动保存采集到的片段。';
+    list.textContent = '尚无学习记录。读取视频后，这里会保存视频链接与可用的本地音频。';
     return;
   }
   for (const entry of entries) {
@@ -4159,12 +4163,56 @@ async function refreshAudioLibrary() {
     title.textContent = entry.title;
     const info = document.createElement('p'),
       summary = audioCoverage(entry.clips);
-    info.textContent = `已保存 ${formatTime(summary.seconds)} · ${(summary.bytes / 1048576).toFixed(1)} MB · ${entry.clips.length} 段`;
-    box.append(
-      title,
-      info,
-      button('打开本地学习', () => openLocalAudio(entry)),
-    );
+    const complete =
+      entry.duration > 0 &&
+      summary.ranges.some((range) => range.start <= 0.5 && range.end >= entry.duration - 1);
+    info.textContent = entry.clips.length
+      ? `已保存 ${formatTime(summary.seconds)} / ${formatTime(entry.duration || summary.seconds)} · ${(summary.bytes / 1048576).toFixed(1)} MB · ${entry.clips.length} 段`
+      : '音频尚未保存';
+    box.append(title, info);
+    if (entry.url)
+      box.append(
+        button('打开视频链接', () => chrome.tabs.create({ url: entry.url })),
+        button('复制视频链接', () => copy(entry.url)),
+      );
+    if (entry.clips.length) box.append(button('打开本地学习', () => openLocalAudio(entry)));
+    if (
+      !complete &&
+      entry.audioStatus?.state !== 'saving' &&
+      ['youtube', 'bilibili'].includes(entry.platform)
+    )
+      box.append(
+        button('后台保存音频', async () => {
+          if (!tabId || record?.videoKey !== entry.videoKey || localAudioMode)
+            throw new Error('请先打开并读取这个视频，再保存音频。');
+          await rpc('SAVE_VIDEO_AUDIO', { recordId: entry.recordId, tabId, retry: true });
+          await refreshAudioLibrary();
+        }),
+      );
+    if (entry.audioStatus?.state === 'saving') {
+      box.append(
+        el(
+          'p',
+          'hint',
+          `正在后台保存音频 · ${(entry.audioStatus.bytes / 1048576).toFixed(1)} MB${entry.audioStatus.total ? ` / ${(entry.audioStatus.total / 1048576).toFixed(1)} MB` : ''}`,
+        ),
+      );
+      box.append(
+        button('取消保存', async () => {
+          await rpc('CANCEL', {
+            recordId: `audio:${entry.videoKey}`,
+            capability: 'audio-download',
+          });
+          await refreshAudioLibrary();
+        }),
+      );
+    }
+    if (['failed', 'unavailable'].includes(entry.audioStatus?.state))
+      box.append(el('p', 'hint', `后台保存未完成：${entry.audioStatus.error}`));
+    if (!entry.clips.length) {
+      list.append(box);
+      continue;
+    }
     const details = document.createElement('details'),
       heading = document.createElement('summary');
     heading.textContent = '音频片段、导出与重试';
@@ -4186,44 +4234,48 @@ async function refreshAudioLibrary() {
           const url = URL.createObjectURL(data.blob),
             a = document.createElement('a');
           a.href = url;
-          a.download = `CueMind-${Math.floor(clip.start)}-${Math.ceil(clip.end)}.webm`;
+          a.download = `CueMind-${Math.floor(clip.start)}-${Math.ceil(clip.end)}.${clip.mimeType?.includes('mp4') ? 'm4a' : 'webm'}`;
           a.click();
           setTimeout(() => URL.revokeObjectURL(url), 10000);
         }),
-        button('识别并补译', async () => {
-          if (busy || backgroundBusy || recording) throw new Error('请等待当前任务完成');
-          await openLocalAudio(entry);
-          const id = record.id,
-            gen = generation;
-          busy = true;
-          try {
-            status('正在读取已保存音频并识别…');
-            const data = await getAudio(clip.id);
-            if (!data?.blob) throw new Error('音频已删除');
-            const audio = await prepareSpeechAudio(
-              data.blob,
-              speechSettings(settings, record.videoInfo.platform),
-            );
-            const updated = await rpc('RETRY_SAVED_AUDIO', {
-              recordId: id,
-              clipId: clip.id,
-              dataUrl: await dataURL(audio),
-            });
-            if (gen !== generation) return;
-            record = updated;
-            render();
-            status('原文已保存');
-          } finally {
-            busy = false;
-          }
-          if (gen === generation && modelReady()) {
-            const ids = record.sentences
-              .filter((s) => s.start < clip.end && s.end > clip.start && !s.translation)
-              .map((s) => s.id);
-            for (let i = 0; i < ids.length; i += 70)
-              await task('translation', { selectedIds: ids.slice(i, i + 70) });
-          } else if (gen === generation) status('原文已保存；配置文本模型后可补齐译文。');
-        }),
+        ...(clip.end - clip.start <= 180 && clip.bytes <= 24 * 1048576
+          ? [
+              button('识别并补译', async () => {
+                if (busy || backgroundBusy || recording) throw new Error('请等待当前任务完成');
+                await openLocalAudio(entry);
+                const id = record.id,
+                  gen = generation;
+                busy = true;
+                try {
+                  status('正在读取已保存音频并识别…');
+                  const data = await getAudio(clip.id);
+                  if (!data?.blob) throw new Error('音频已删除');
+                  const audio = await prepareSpeechAudio(
+                    data.blob,
+                    speechSettings(settings, record.videoInfo.platform),
+                  );
+                  const updated = await rpc('RETRY_SAVED_AUDIO', {
+                    recordId: id,
+                    clipId: clip.id,
+                    dataUrl: await dataURL(audio),
+                  });
+                  if (gen !== generation) return;
+                  record = updated;
+                  render();
+                  status('原文已保存');
+                } finally {
+                  busy = false;
+                }
+                if (gen === generation && modelReady()) {
+                  const ids = record.sentences
+                    .filter((s) => s.start < clip.end && s.end > clip.start && !s.translation)
+                    .map((s) => s.id);
+                  for (let i = 0; i < ids.length; i += 70)
+                    await task('translation', { selectedIds: ids.slice(i, i + 70) });
+                } else if (gen === generation) status('原文已保存；配置文本模型后可补齐译文。');
+              }),
+            ]
+          : []),
       );
       details.append(row);
     }
@@ -4231,6 +4283,7 @@ async function refreshAudioLibrary() {
       details,
       button('删除此视频本地音频', async () => {
         if (recording) throw new Error('请先结束音频采集');
+        if (entry.audioStatus?.state === 'saving') throw new Error('请先取消后台音频保存');
         if (!confirm('删除此视频已保存的音频？字幕、译文和重点词会保留。删除后需要重新采集音频。'))
           return;
         if (localAudioMode && record?.videoKey === entry.videoKey) localPlayer.dispose();

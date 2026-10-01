@@ -1,4 +1,4 @@
-import { getAudio, audioClips } from './storage/audio.js';
+import { getAudio, audioClips, saveAudio, audioCoverage } from './storage/audio.js';
 import { fetchSupadata } from './services/supadata.js';
 import { clearLearningCache, dataActions } from './core/local-data.js';
 import { recoverEquivalentLearning, recoverOrphanedFocus } from './core/record-recovery.js';
@@ -6,7 +6,7 @@ import { normalizeFocusConfig, selectFocusConfig } from './core/focus.js';
 import { focusState } from './services/focus.js';
 import { taskConflict } from './core/task-lock.js';
 import WBI from './services/wbi.js';
-import { inspectPage, canReuseTranscript } from './services/platform.js';
+import { inspectPage, inspectAudioSource, canReuseTranscript } from './services/platform.js';
 import {
   normalizeCaptions,
   deduplicateAsrCaptions,
@@ -28,6 +28,7 @@ import { keyFromUrl, matchesVideoUrl } from './core/video.js';
 import { captureClockProblem, planAsrSegments, skipRecognizedAudio } from './core/asr-progress.js';
 import { checkSpeechNetwork, speechSettings } from './services/speech.js';
 const tasks = new Map();
+const audioDownloads = new Map();
 let capture = null,
   restoring = false;
 setInterval(() => {
@@ -163,6 +164,135 @@ async function page(tabId, trackId, expectedKey) {
   )
     throw new Error('视频已切换，已丢弃旧响应。');
   return data;
+}
+
+function supportedAudioUrl(platform, value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:') return false;
+    if (platform === 'youtube')
+      return /(^|\.)googlevideo\.com$/.test(url.hostname) && url.pathname === '/videoplayback';
+    return /(^|\.)(hdslb\.com|bilivideo\.cn|bilivideo\.com)$/.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function downloadVideoAudio(record, tabId, controller) {
+  const { videoInfo: info, videoKey: key } = record;
+  const result = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: inspectAudioSource,
+    args: [key],
+  });
+  const candidates = result[0]?.result || [];
+  const maxBytes = 250 * 1048576;
+  const sources = candidates.filter(
+    (item) => supportedAudioUrl(info.platform, item.url) && item.bytes <= maxBytes,
+  );
+  if (!sources.length) throw new Error('当前播放器没有可访问的音频文件；可用播放采集保存。');
+  let downloaded;
+  let lastError;
+  for (const source of sources.slice(0, 4)) {
+    try {
+      const response = await fetch(source.url, {
+        signal: controller.signal,
+        referrer: info.url,
+        referrerPolicy: 'no-referrer-when-downgrade',
+      });
+      if (!response.ok || !supportedAudioUrl(info.platform, response.url))
+        throw new Error(`音频文件请求失败（HTTP ${response.status}）`);
+      if (Number(response.headers.get('content-length')) > maxBytes)
+        throw new Error('音频文件超过 250 MB');
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('平台未提供可读取的音频流');
+      const chunks = [];
+      let bytes = 0;
+      let complete = false;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            complete = true;
+            break;
+          }
+          bytes += value.byteLength;
+          if (bytes > maxBytes) throw new Error('音频文件超过 250 MB');
+          chunks.push(value);
+          audioDownloads.set(key, {
+            state: 'saving',
+            bytes,
+            total: Number(response.headers.get('content-length')) || source.bytes,
+          });
+        }
+      } finally {
+        if (!complete) await reader.cancel().catch(() => {});
+        reader.releaseLock();
+      }
+      if (!bytes) throw new Error('平台返回的音频文件为空');
+      downloaded = { chunks, bytes, source };
+      break;
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      lastError = error;
+    }
+  }
+  if (!downloaded)
+    throw new Error(`后台获取音频失败：${lastError?.message || '无可用音轨'}；可用播放采集保存。`);
+  // A single audio-only DASH track starts at video time zero and is seekable
+  // offline. Save only after the complete stream arrives; partial files are not
+  // marked as full coverage.
+  const mimeType = downloaded.source.mimeType.split(';')[0];
+  await saveAudio({
+    videoKey: key,
+    recordId: record.id,
+    segmentId: 'download',
+    start: 0,
+    end: Number(info.duration) || 0,
+    blob: new Blob(downloaded.chunks, { type: mimeType }),
+  });
+  audioDownloads.set(key, { state: 'saved', bytes: downloaded.bytes });
+  notify({ event: 'audio-saved', videoKey: key });
+}
+
+async function startVideoAudioDownload(recordId, tabId, retry = false) {
+  const record = await requireRecord(recordId);
+  const { videoKey: key, videoInfo: info } = record;
+  if (!['youtube', 'bilibili'].includes(info.platform)) return { state: 'unsupported' };
+  if (!Number.isFinite(info.duration) || info.duration <= 0) {
+    const result = { state: 'unavailable', error: '播放器尚未提供视频时长。' };
+    audioDownloads.set(key, result);
+    return result;
+  }
+  const existing = audioDownloads.get(key);
+  if (existing?.state === 'saving' || (existing?.state === 'failed' && !retry)) return existing;
+  const clips = await audioClips(key);
+  if (audioDownloads.get(key)?.state === 'saving') return audioDownloads.get(key);
+  if (
+    audioCoverage(clips).ranges.some(
+      (range) => range.start <= 0.5 && range.end >= info.duration - 1,
+    )
+  )
+    return { state: 'saved' };
+  const tab = await chrome.tabs.get(tabId);
+  if (!matchesVideoUrl(key, tab.url)) throw new Error('视频已切换，请重新读取。');
+  const controller = new AbortController();
+  audioDownloads.set(key, { state: 'saving', bytes: 0 });
+  const taskId = `audio:${key}`;
+  tasks.set(taskId, { controller, recordId: taskId, capability: 'audio-download' });
+  downloadVideoAudio(record, tabId, controller)
+    .catch((error) => {
+      audioDownloads.set(
+        key,
+        controller.signal.aborted
+          ? { state: 'paused', error: '已取消' }
+          : { state: 'failed', error: error.message },
+      );
+      notify({ event: 'audio-save-failed', videoKey: key });
+    })
+    .finally(() => tasks.delete(taskId));
+  return { state: 'saving' };
 }
 async function player(tabId, data) {
   let r;
@@ -731,6 +861,8 @@ async function route(m) {
         recovered.cacheEntries
       )
         await store(result.record);
+      result.record.lastStudiedAt = Date.now();
+      await db.put('videos', result.record);
       return {
         ...result,
         recovered: { translations: recovered.translations, focus: recovered.focus },
@@ -1042,18 +1174,33 @@ async function route(m) {
   if (m.type === 'AUDIO_LIBRARY') {
     const clips = await audioClips();
     const videos = await db.all('videos');
-    return [...new Set(clips.map((c) => c.videoKey))]
+    return [
+      ...new Set(videos.filter((v) => v.videoInfo?.platform !== 'demo').map((v) => v.videoKey)),
+    ]
       .map((key) => {
         const group = clips.filter((c) => c.videoKey === key);
         const record = videos
           .filter((v) => v.videoKey === key)
           .sort((a, b) => (b.sentences?.length || 0) - (a.sentences?.length || 0))[0];
         return record
-          ? { recordId: record.id, videoKey: key, title: record.videoInfo.title, clips: group }
+          ? {
+              recordId: record.id,
+              videoKey: key,
+              title: record.videoInfo.title,
+              url: matchesVideoUrl(key, record.videoInfo.url) ? record.videoInfo.url : '',
+              platform: record.videoInfo.platform,
+              duration: record.videoInfo.duration,
+              updatedAt: record.lastStudiedAt || record.updatedAt,
+              audioStatus: audioDownloads.get(key) || null,
+              clips: group,
+            }
           : null;
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
   }
+  if (m.type === 'SAVE_VIDEO_AUDIO')
+    return startVideoAudioDownload(m.recordId, m.tabId, m.retry === true);
   if (m.type === 'RETRY_SAVED_AUDIO')
     return locked(m.recordId, 'asr', async (signal) => {
       const record = await requireRecord(m.recordId),

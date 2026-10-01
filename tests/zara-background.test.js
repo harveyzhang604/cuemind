@@ -18,14 +18,52 @@ import {recoverEquivalentLearning,recoverOrphanedFocus} from '../extension/core/
 import {selectFocusConfig} from '../extension/core/focus.js';
 import {explanationCacheKey} from '../extension/services/explanation-cache.js';
 async function fixture(existingStorage){
- const noop=()=>{},listeners=[],stores={videos:new Map(),notes:new Map(),chats:new Map()},storage=existingStorage||{settings:{...defaults,transcriptProvider:'supadata',supadataApiKey:'fixture'}};
- const inspection={info:{platform:'youtube',videoId:'sHieyY4r0-k',page:1,title:'Fixture',audioLanguage:'en',url:'https://www.youtube.com/watch?v=sHieyY4r0-k'},tracks:[]};
- const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,
+ const noop=()=>{},listeners=[],stores={videos:new Map(),notes:new Map(),chats:new Map(),audio:new Map()},storage=existingStorage||{settings:{...defaults,transcriptProvider:'supadata',supadataApiKey:'fixture'}};
+ const inspection={info:{platform:'youtube',videoId:'sHieyY4r0-k',page:1,title:'Fixture',duration:30,audioLanguage:'en',url:'https://www.youtube.com/watch?v=sHieyY4r0-k'},tracks:[]};
+ const audioClips=async key=>[...stores.audio.values()].filter(clip=>!key||clip.videoKey===key).map(({blob,...clip})=>clip);
+ const audioCoverage=clips=>({ranges:clips.map(clip=>({start:clip.start,end:clip.end}))});
+ const saveAudio=async clip=>{stores.audio.set(clip.videoKey+':'+clip.segmentId,{...clip,id:clip.videoKey+':'+clip.segmentId,bytes:clip.blob.size});};
+ const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,ReadableStream,Blob,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,audioClips,audioCoverage,saveAudio,inspectAudioSource:()=>{},
  db:{get:async(name,id)=>structuredClone(stores[name].get(id)),all:async name=>structuredClone([...stores[name].values()]),put:async(name,value)=>{stores[name].set(value.id,structuredClone(value));return value;},remove:async(name,id)=>stores[name].delete(id),updateNote:async(id,expected,change)=>{const n=stores.notes.get(id);if(n?.updatedAt!==expected)return null;const next={...n,...change};stores.notes.set(id,structuredClone(next));return next;},manage:async(action,transform)=>{if(action==='reset'){Object.values(stores).forEach(s=>s.clear());}else if(action==='delete-notes')stores.notes.clear();else{stores.chats.clear();for(const [id,r]of stores.videos)stores.videos.set(id,transform(r));}}},
- chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},tabs:{get:async()=>({url:inspection.info.url}),sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
+ chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},scripting:{executeScript:async()=>[{result:[]}]},tabs:{get:async()=>({url:inspection.info.url}),sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
  context.cachedCompletion=(...args)=>context.completion(...args.slice(0,5));
  const source=(await readFile(new URL('../extension/background.js',import.meta.url),'utf8')).replace(/^import [\s\S]*?;\s*/gm,'');vm.createContext(context);vm.runInContext(source+'\npage=async()=>structuredClone(inspection);globalThis.router=route;',context);return {context,stores,storage,inspection,listeners,route:context.router};
 }
+test('learning history keeps video links and independently downloaded audio',async()=>{
+ const f=await fixture();f.context.fetchSupadata=async()=>({raw:normalizeCaptions([{start:0,end:2,text:'Study this video.'}]),language:'en'});
+ const {record}=await f.route({type:'LOAD',tabId:1});
+ let history=await f.route({type:'AUDIO_LIBRARY'});
+ assert.equal(history[0].url,'https://www.youtube.com/watch?v=sHieyY4r0-k');
+ assert.equal(history[0].clips.length,0);
+ const mediaUrl='https://rr1.googlevideo.com/videoplayback?id=fixture';
+ f.context.chrome.scripting.executeScript=async()=>[{result:[{url:mediaUrl,mimeType:'audio/mp4',bytes:4}]}];
+ f.context.fetch=async()=>({ok:true,status:200,url:mediaUrl,headers:{get:()=> '4'},body:new ReadableStream({start(controller){controller.enqueue(new Uint8Array([1,2,3,4]));controller.close();}})});
+ assert.equal((await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1})).state,'saving');
+ for(let i=0;i<20 && !f.stores.audio.size;i++)await new Promise(resolve=>setImmediate(resolve));
+ history=await f.route({type:'AUDIO_LIBRARY'});
+ assert.equal(history[0].clips.length,1);
+ assert.equal(history[0].clips[0].start,0);
+ assert.equal(history[0].clips[0].end,30);
+ assert.equal(f.stores.audio.values().next().value.blob.size,4);
+ assert.equal((await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1})).state,'saved');
+});
+test('unavailable direct audio leaves history intact and can be retried',async()=>{
+ const f=await fixture();f.context.fetchSupadata=async()=>({raw:[],language:'en'});
+ const {record}=await f.route({type:'LOAD',tabId:1});
+ const mediaUrl='https://rr1.googlevideo.com/videoplayback?id=fixture';
+ f.context.chrome.scripting.executeScript=async()=>[{result:[{url:mediaUrl,mimeType:'audio/mp4',bytes:4}]}];
+ f.context.fetch=async()=>({ok:false,status:403,url:mediaUrl});
+ await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1});
+ let history;
+ for(let i=0;i<20;i++){history=await f.route({type:'AUDIO_LIBRARY'});if(history[0].audioStatus?.state==='failed')break;await new Promise(resolve=>setImmediate(resolve));}
+ assert.equal(history[0].clips.length,0);
+ assert.equal(history[0].audioStatus.state,'failed');
+ assert.equal(history[0].url,'https://www.youtube.com/watch?v=sHieyY4r0-k');
+ f.context.fetch=async()=>({ok:true,status:200,url:mediaUrl,headers:{get:()=> '4'},body:new ReadableStream({start(controller){controller.enqueue(new Uint8Array([1,2,3,4]));controller.close();}})});
+ assert.equal((await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1,retry:true})).state,'saving');
+ for(let i=0;i<20 && !f.stores.audio.size;i++)await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.stores.audio.size,1);
+});
 test('background Supadata load deduplicates requests, caches results, refresh keeps note provenance',async()=>{
  const f=await fixture();let calls=0;f.context.fetchSupadata=async()=>{calls++;return {raw:normalizeCaptions([{start:.179,end:2,text:'Exact words.'}],'supadata_native'),language:'en',availableLangs:['en']};};
  const m={type:'LOAD',tabId:1,trackId:'auto',videoKey:videoKey(f.inspection.info)};

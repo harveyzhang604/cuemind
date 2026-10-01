@@ -6,6 +6,71 @@ export function canReuseTranscript(record, tracks) {
     return true;
   return !!tracks[0] && meta.trackId === tracks[0].id;
 }
+
+// Runs in the video page so media URLs come from the player's current session.
+// Only return an audio-only URL; never download the video track or expose it to AI.
+export async function inspectAudioSource(expectedKey) {
+  const url = new URL(location.href);
+  const youtube = url.hostname === 'www.youtube.com';
+  const id = youtube ? url.searchParams.get('v') : url.pathname.match(/^\/video\/(BV\w+)/)?.[1];
+  const page = youtube ? 1 : Number(url.searchParams.get('p') || 1);
+  const key = `${youtube ? 'youtube' : 'bilibili'}:${id}:${page}`;
+  if (!id || key !== expectedKey) throw new Error('视频已切换，请重新读取。');
+  let streams;
+  if (youtube) {
+    const player = document.getElementById('movie_player');
+    const active = player?.getPlayerResponse?.();
+    const response = active?.streamingData?.adaptiveFormats?.length
+      ? active
+      : window.ytInitialPlayerResponse;
+    if (response?.videoDetails?.videoId !== id) throw new Error('播放器正在切换。');
+    streams = response.streamingData?.adaptiveFormats || [];
+  } else {
+    const view = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${id}`, {
+      credentials: 'include',
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!view.ok) throw new Error(`B站视频信息请求失败（${view.status}）`);
+    const cid = (await view.json()).data?.pages?.[page - 1]?.cid;
+    if (!cid) throw new Error('未找到当前分 P 的音频。');
+    const play = await fetch(
+      `https://api.bilibili.com/x/player/playurl?bvid=${id}&cid=${cid}&fnval=16`,
+      { credentials: 'include', signal: AbortSignal.timeout(20000) },
+    );
+    if (!play.ok) throw new Error(`B站音频地址请求失败（${play.status}）`);
+    const result = await play.json();
+    if (result.code !== 0) throw new Error(`B站未提供音频（${result.code}）`);
+    const data = result.data;
+    streams = data?.dash?.audio || [];
+  }
+  const current = new URL(location.href);
+  if (
+    `${youtube ? 'youtube' : 'bilibili'}:${youtube ? current.searchParams.get('v') : current.pathname.match(/^\/video\/(BV\w+)/)?.[1]}:${youtube ? 1 : Number(current.searchParams.get('p') || 1)}` !==
+    expectedKey
+  )
+    throw new Error('视频已切换，请重新读取。');
+  const candidates = streams
+    .flatMap((stream) =>
+      [
+        stream.url || stream.baseUrl || stream.base_url,
+        ...(stream.backupUrl || stream.backup_url || []),
+      ]
+        .filter(Boolean)
+        .map((mediaUrl) => ({
+          url: mediaUrl,
+          mimeType: stream.mimeType || stream.mime_type || 'audio/mp4',
+          bytes: Number(stream.contentLength) || 0,
+          bandwidth: Number(stream.bitrate || stream.bandwidth) || 0,
+        })),
+    )
+    .filter((stream) => stream.url && /^audio\//.test(stream.mimeType))
+    .sort(
+      (a, b) =>
+        Math.abs((a.bandwidth || 128000) - 128000) - Math.abs((b.bandwidth || 128000) - 128000),
+    );
+  if (!candidates.length) throw new Error('播放器未提供可独立下载的音频地址；仍可使用播放采集。');
+  return candidates;
+}
 export async function inspectPage(trackId, expectedKey, signedPlayerUrl) {
   const fetchJson = async (url) => {
     const r = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(20000) });

@@ -1,6 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {inspectPage,canReuseTranscript} from '../extension/services/platform.js';
+import {inspectPage,inspectAudioSource,canReuseTranscript} from '../extension/services/platform.js';
+
+test('YouTube audio source uses the current player and excludes video-only streams',async()=>{
+ const previous={location:globalThis.location,document:globalThis.document,window:globalThis.window};
+ const audio='https://rr1.googlevideo.com/videoplayback?id=audio';
+ globalThis.location={href:'https://www.youtube.com/watch?v=fixture'};
+ globalThis.document={getElementById:()=>({getPlayerResponse:()=>({videoDetails:{videoId:'fixture'},streamingData:{adaptiveFormats:[{mimeType:'video/mp4',url:'https://rr1.googlevideo.com/videoplayback?id=video'},{mimeType:'audio/mp4',url:audio,bitrate:64000}]}})})};
+ globalThis.window={};
+ try{
+  assert.deepEqual((await inspectAudioSource('youtube:fixture:1')).map(x=>x.url),[audio]);
+  await assert.rejects(inspectAudioSource('youtube:other:1'),/视频已切换/);
+ }finally{for(const [key,value] of Object.entries(previous)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}}
+});
+
+test('Bilibili audio source resolves the selected part and includes backup CDN URLs',async()=>{
+ const previous={location:globalThis.location,window:globalThis.window,fetch:globalThis.fetch};
+ const requests=[];
+ globalThis.location={href:'https://www.bilibili.com/video/BVfixture/?p=2'};
+ globalThis.window={};
+ globalThis.fetch=async url=>{requests.push(String(url));return {ok:true,json:async()=>url.includes('/view?')?{data:{pages:[{cid:1},{cid:2}]}}:{code:0,data:{dash:{audio:[{baseUrl:'https://a.hdslb.com/audio.m4s',backupUrl:['https://b.hdslb.com/audio.m4s'],mimeType:'audio/mp4'}]}}}};};
+ try{
+  const result=await inspectAudioSource('bilibili:BVfixture:2');
+  assert.equal(result.length,2);
+  assert.match(requests[1],/cid=2/);
+ }finally{for(const [key,value] of Object.entries(previous)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}}
+});
 
 async function inspect({audio='en',playingAudio,tracks,selected=null,resources=[],requests=[]}){
  const previous={document:globalThis.document,window:globalThis.window,location:globalThis.location,performance:globalThis.performance,fetch:globalThis.fetch};
