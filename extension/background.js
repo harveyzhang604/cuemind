@@ -331,13 +331,32 @@ function migrateMiguAsrDuplicates(record) {
     !record.transcriptMeta?.source?.startsWith('whisper')
   )
     return false;
-  const { kept, removed } = deduplicateAsrCaptions(record.rawCaptions || []);
+  const preferred = new Set(
+    record.sentences
+      .filter((sentence) => sentence.translation)
+      .flatMap((sentence) => sentence.sourceIds || []),
+  );
+  const { kept, removed } = deduplicateAsrCaptions(record.rawCaptions || [], preferred);
   if (!removed.length) return false;
+  const learningBefore = {
+    ...record,
+    id: `${record.id}:before-deduplication`,
+    sentences: structuredClone(record.sentences),
+    focusConfig: structuredClone(record.focusConfig),
+    focusCache: structuredClone(record.focusCache),
+    focusCaches: structuredClone(record.focusCaches),
+    translationCaches: structuredClone(record.translationCaches || {}),
+    tasks: structuredClone(record.tasks || {}),
+  };
   // Retain originals locally so a conservative merge remains recoverable.
   record.transcriptMeta.duplicateCaptionBackup ||= [];
   record.transcriptMeta.duplicateCaptionBackup.push({
     savedAt: Date.now(),
     rawCaptions: removed,
+    focusConfig: learningBefore.focusConfig,
+    focusCache: learningBefore.focusCache,
+    focusCaches: learningBefore.focusCaches,
+    originalSentences: learningBefore.sentences,
     sentences: record.sentences.filter((sentence) =>
       sentence.sourceIds?.some((id) => removed.some((cue) => cue.id === id)),
     ),
@@ -350,6 +369,7 @@ function migrateMiguAsrDuplicates(record) {
     if (old) Object.assign(sentence, old);
   }
   record.paragraphs = paragraphs(record.sentences);
+  recoverEquivalentLearning(record, [learningBefore]);
   reconcileAsrTranslationStatuses(record);
   return true;
 }
@@ -690,6 +710,14 @@ async function route(m) {
     }).finally(() => loadFlights.delete(key));
     loadFlights.set(key, work);
     return work;
+  }
+  if (m.type === 'DEDUPLICATE_ASR') {
+    assertAvailable(m.recordId);
+    const record = await db.get('videos', m.recordId);
+    if (!record) throw new Error('请先读取字幕');
+    const before = record.sentences.length;
+    if (migrateMiguAsrDuplicates(record)) await store(record);
+    return { record, removed: Math.max(0, before - record.sentences.length) };
   }
   if (m.type === 'IMPORT') {
     if (restoring) throw new Error('正在恢复备份');
@@ -1473,7 +1501,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
         );
         // A very short failed interval needs at least two seconds of audio for
         // the recorder, but only retain words from the requested gap.
-        const extra = s.retryRange
+        const candidates = s.retryRange
           ? recognized
               .filter((cue) => cue.start < s.retryRange.end && cue.end > s.retryRange.start)
               .map((cue) => ({
@@ -1482,6 +1510,15 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
                 end: Math.min(cue.end, s.retryRange.end),
               }))
           : recognized;
+        // A capture retry may include context that is already transcribed.
+        // Reuse those existing cues even when a new ASR pass words them differently.
+        const extra = candidates.filter(
+          (cue) =>
+            !r.rawCaptions.some((old) => {
+              const overlap = Math.min(old.end, cue.end) - Math.max(old.start, cue.start);
+              return overlap > 0 && overlap >= (cue.end - cue.start) * 0.8;
+            }),
+        );
         r.rawCaptions = [...r.rawCaptions, ...extra].sort((a, b) => a.start - b.start);
         migrateMiguAsrDuplicates(r);
         r.sentences = localSentences(r.rawCaptions);
@@ -1506,7 +1543,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
           });
         }
         segment.end = s.retryRange ? Math.min(capturedEnd, s.retryRange.end) : capturedEnd;
-        segment.status = extra.length ? 'source-ready' : 'no-speech';
+        segment.status = asrSentences(r, segment).length ? 'source-ready' : 'no-speech';
         segment.sentenceCount = asrSentences(r, segment).length;
         r.transcriptMeta.capturedUntil = Math.max(
           Number(r.transcriptMeta.capturedUntil) || 0,

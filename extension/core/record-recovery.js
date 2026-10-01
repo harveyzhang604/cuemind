@@ -29,6 +29,12 @@ function sentencePairs(target, source) {
     targetTextCount.set(sentence.rawText, (targetTextCount.get(sentence.rawText) || 0) + 1);
   for (const sentence of target) {
     const sameText = byText.get(sentence.rawText) || [];
+    const exact = sameText.find((other) => other.id === sentence.id && !used.has(other.id));
+    if (exact) {
+      used.add(exact.id);
+      pairs.set(exact.id, sentence);
+      continue;
+    }
     let candidates = sameText.filter(
       (other) =>
         !used.has(other.id) &&

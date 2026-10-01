@@ -2087,6 +2087,23 @@ $('#translate').onclick = guard(() => {
   );
 });
 $('#retry-translation').onclick = guard(() => task('translation'));
+$('#deduplicate-asr').onclick = guard(async () => {
+  if (!record) return;
+  await syncTaskState();
+  if (busy || backgroundBusy || recording) throw new Error('请先完成或取消当前任务。');
+  const id = record.id,
+    gen = generation;
+  const result = await rpc('DEDUPLICATE_ASR', { recordId: id });
+  if (gen !== generation || record?.id !== id) return;
+  record = result.record;
+  render();
+  await bindPlayer(true);
+  status(
+    result.removed
+      ? `已合并 ${result.removed} 条重复字幕，其他版本已备份在本机。`
+      : '未发现符合合并条件的重复字幕。',
+  );
+});
 $('#analyze-study').onclick = guard(() => task('study'));
 $('#analyze-overview').onclick = guard(() => task('analysis'));
 $('#cancel').onclick = guard(() => rpc('CANCEL', { recordId: record?.id }));
@@ -2744,6 +2761,7 @@ function renderCapture() {
     : 0;
   $('#retry-translation').hidden = !missingTranslations;
   $('#retry-translation').disabled = busy || backgroundBusy || recording;
+  $('#deduplicate-asr').disabled = busy || backgroundBusy || recording;
   $('#retry-translation').textContent = `补齐未完成译文（${missingTranslations} 句）`;
   $('#retry-translation-help').hidden = !missingTranslations;
   $('#record').textContent =
@@ -3513,6 +3531,7 @@ function updateTranslationPrompt() {
     control.disabled = busy || backgroundBusy || recording;
   });
   $('#retry-translation').disabled = busy || backgroundBusy || recording;
+  $('#deduplicate-asr').disabled = busy || backgroundBusy || recording;
   $('#translate').textContent = busy ? '正在翻译…' : replayArmed ? '翻译选中字幕' : '补齐全片译文';
 }
 function replayBounds() {

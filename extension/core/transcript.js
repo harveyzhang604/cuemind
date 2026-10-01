@@ -157,7 +157,7 @@ export function timestampUrl(v, t) {
 // Alternate ASR passes can disagree in wording while describing the same audio.
 // Require strongly overlapping timing and similar wording; never dedupe by the
 // displayed whole-second timestamp alone.
-export function deduplicateAsrCaptions(raw) {
+export function deduplicateAsrCaptions(raw, preferredIds = new Set()) {
   const kept = [],
     removed = [];
   const words = (text) =>
@@ -166,7 +166,9 @@ export function deduplicateAsrCaptions(raw) {
         .toLowerCase()
         .match(/[\p{L}\p{N}]+/gu) || [],
     );
-  for (const cue of [...raw].sort((a, b) => a.start - b.start)) {
+  for (const cue of [...raw].sort(
+    (a, b) => Number(preferredIds.has(b.id)) - Number(preferredIds.has(a.id)) || a.start - b.start,
+  )) {
     const tokens = words(cue.text);
     const duplicate = kept.findLast((old) => {
       const overlap = Math.min(old.end, cue.end) - Math.max(old.start, cue.start);
@@ -177,13 +179,14 @@ export function deduplicateAsrCaptions(raw) {
       const shared = [...tokens].filter((word) => previous.has(word)).length;
       const similarity = shared / Math.max(tokens.size, previous.size, 1);
       const sameInterval =
-        Math.abs(old.start - cue.start) <= 0.25 &&
-        Math.abs(old.end - cue.end) <= 0.25 &&
+        Math.abs(old.start - cue.start) <= 0.5 &&
+        Math.abs(old.end - cue.end) <= 0.5 &&
         shortest >= 1;
       return similarity >= 0.6 || (sameInterval && shared >= 3 && similarity >= 0.25);
     });
     if (duplicate) removed.push(cue);
     else kept.push(cue);
   }
+  kept.sort((a, b) => a.start - b.start);
   return { kept, removed };
 }
