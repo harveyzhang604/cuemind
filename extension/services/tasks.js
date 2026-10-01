@@ -159,19 +159,25 @@ export async function runTask(record, capability, settings, args, signal, save, 
       try {
         // Retry only the missing line. A long mixed-speech batch can make the
         // model omit or embellish one sentence while the other lines are sound.
+        // Use a short request ID for this one-item repair: ASR sentence UUIDs
+        // are long enough that models sometimes copy them incorrectly.
+        const item = { id: '0', rawText: sentence.rawText };
+        const oneValid = (result) =>
+          Array.isArray(result?.translations) &&
+          result.translations.length === 1 &&
+          typeof result.translations[0]?.text === 'string' &&
+          (!strictTranslation ||
+            groundedTranslation(sentence.rawText, result.translations[0].text));
         const repaired = await request(
           {
             targetLanguage: settings.targetLanguage,
-            items: [{ id: sentence.id, text: sentence.rawText }],
+            items: [{ id: item.id, text: sentence.rawText }],
             repair: '只翻译这一条原文，不补充背景或其他句子的内容。',
           },
-          (result) => reusableRows(result, [sentence]),
+          oneValid,
         );
-        const [fixed] = alignTranslations(
-          [sentence],
-          validTranslations([sentence], repaired?.translations || []),
-        );
-        if (fixed.translation) aligned[index] = fixed;
+        if (oneValid(repaired))
+          aligned[index] = { ...sentence, translation: repaired.translations[0].text.trim() };
       } catch (error) {
         if (signal.aborted) throw error;
       }

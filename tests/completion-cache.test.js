@@ -72,9 +72,23 @@ test('automatic Migu translation repairs an omitted line alone and uses short ba
   const result=await runTask(record,'translation',{apiKey:'fixture',targetLanguage:'简体中文'},{currentTime:0},signal(),async()=>{},()=>{});
   assert.equal(result.partial,false);
   assert.ok(record.sentences.every(sentence=>sentence.translation==='准确译文。'));
-  assert.ok(requests.some(input=>input.repair&&input.items.length===1&&input.items[0].id==='s0'));
+  assert.ok(requests.some(input=>input.repair&&input.items.length===1&&input.items[0].id==='0'));
   assert.ok(requests.filter(input=>!input.repair).length>1);
   assert.ok(requests.filter(input=>!input.repair).every(input=>input.items.length<=4));
+ }finally{global.fetch=previous;}
+});
+test('single-line Migu repair accepts grounded text when model mangles the ID',async()=>{
+ const previous=global.fetch,inputs=[];
+ global.fetch=async(_url,init)=>{
+  const input=JSON.parse(JSON.parse(init.body).messages.at(-1).content);inputs.push(input);
+  return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({translations:[{id:input.repair?'wrong-id':input.items[0].id,text:input.repair?'这是准确译文。':'2026 年无关赛事介绍。'}]})}}]}));
+ };
+ const record={videoInfo:{platform:'migu'},transcriptMeta:{source:'whisper'},sentences:[{id:'sent-very-long-uuid',start:0,end:3,rawText:'This is an ordinary sentence.'}]};
+ try{
+  const result=await runTask(record,'translation',{apiKey:'fixture',targetLanguage:'简体中文'},{},signal(),async()=>{},()=>{});
+  assert.equal(result.partial,false);
+  assert.equal(record.sentences[0].translation,'这是准确译文。');
+  assert.equal(inputs[1].items[0].id,'0');
  }finally{global.fetch=previous;}
 });
 test('long ASR paragraph falls back to clause translations while retaining its sentence timing',async()=>{

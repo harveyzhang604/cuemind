@@ -965,7 +965,7 @@
   }
   // Media events do not bubble. Capture them so quick pauses/resumes and a
   // replaced video element are reported even before the periodic snapshot.
-  for (const event of ['play', 'pause'])
+  for (const event of ['play', 'pause', 'seeked'])
     document.addEventListener(
       event,
       (e) => {

@@ -290,6 +290,24 @@ test('matching old bilingual paragraphs reuse sentence-aligned translations with
  const recovered=await f.route({type:'GET_RECORD',recordId:old.id});
  assert.equal(recovered.sentences.filter(s=>s.translation).length,3,'already-split records can reuse the old paragraph cache');
 });
+test('translated sentence spanning ASR chunks completes both saved progress rows',async()=>{
+ const f=await fixture();
+ f.inspection.info={platform:'migu',videoId:'120000587094',page:967772705,title:'Fixture',duration:20,url:'https://www.miguvideo.com/p/live/120000587094'};
+ const loaded=await f.route({type:'LOAD',tabId:1});
+ const record=f.stores.videos.get(loaded.record.id);
+ record.transcriptMeta={...record.transcriptMeta,source:'whisper',translationRevision:2,sentenceRevision:4,alignedTranslationRevision:1,asrSegments:[{id:'first',start:8,end:10,status:'source-ready'},{id:'second',start:10,end:15,status:'source-ready'}]};
+ record.sentences=[{id:'s0',start:8,end:15,rawText:'A sentence crosses the recording boundary.',sourceIds:['r0']}];
+ f.stores.videos.set(record.id,record);
+ f.storage.settings.apiKey='fixture';
+ f.context.runTask=async r=>{r.sentences[0].translation='一句话跨越了录音边界。';return {record:r,errors:[]};};
+ const result=await f.route({type:'TASK',recordId:record.id,capability:'translation',args:{}});
+ assert.deepEqual(result.record.transcriptMeta.asrSegments.map(segment=>segment.status),['done','done']);
+ const stale=f.stores.videos.get(record.id);
+ stale.transcriptMeta.asrSegments[1].status='source-ready';
+ f.stores.videos.set(record.id,stale);
+ const recovered=await f.route({type:'GET_RECORD',recordId:record.id});
+ assert.equal(recovered.transcriptMeta.asrSegments[1].status,'done');
+});
 
 test('unreachable ASR stops before capturing audio or replacing saved captions', async()=>{
  const f=await fixture();

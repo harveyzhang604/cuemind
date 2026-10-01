@@ -559,11 +559,16 @@ function renderSentences() {
       $$('.sentence').forEach((n) => n.classList.toggle('reading', n.dataset.id === readingId));
     };
     card.classList.toggle('reading', card.dataset.id === readingId);
-    card.onclick = select;
+    const activate = (event) => {
+      if (event?.target?.closest('button') || getSelection()?.toString()) return;
+      select(event);
+      seekPlay(s.start).catch(error);
+    };
+    card.onclick = activate;
     card.onkeydown = (e) => {
       if (e.target === card && e.key === 'Enter') {
         e.preventDefault();
-        select();
+        activate(e);
       }
       if (e.key === 'Escape' && card.classList.contains('actions-open')) {
         e.preventDefault();
@@ -881,8 +886,11 @@ function receivePlayerState(m) {
   const resumed =
     m.paused === false &&
     (lastContentPaused === null || lastContentPaused === true || m.playbackEvent === 'play');
+  // A user can seek while paused or after browsing the transcript. A seek is
+  // an explicit request to follow the new playhead, even without a play event.
+  const sought = m.playbackEvent === 'seeked';
   if (typeof m.paused === 'boolean') lastContentPaused = m.paused;
-  if (resumed) resumeFollow();
+  if (resumed || sought) resumeFollow();
   if (m.paused === false && !m.session && !replayEditing && !replayStarting) {
     replayViewAnchor = null;
     replaySelection = null;
@@ -914,7 +922,7 @@ function receivePlayerState(m) {
   updateReplayScope();
   // Resuming within the same sentence must also restore its reading position.
   if (
-    (changed || resumed) &&
+    (changed || resumed || sought) &&
     next >= 0 &&
     followPlayback &&
     !getSelection()?.toString() &&
@@ -3301,15 +3309,24 @@ $('#last-subtitle').onclick = () => {
   limit = 70;
   renderSentences();
   const revision = locateRevision;
-  window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+  const align = () => {
+    if (
+      revision !== locateRevision ||
+      followPlayback ||
+      !$('#transcript').classList.contains('active')
+    )
+      return;
+    const last = $('#sentences .sentence:last-child');
+    if (!last) return;
+    window.scrollBy({
+      top: last.getBoundingClientRect().bottom - $('footer').getBoundingClientRect().top + 12,
+      behavior: 'instant',
+    });
+  };
+  align();
   requestAnimationFrame(() =>
     requestAnimationFrame(() => {
-      if (
-        revision === locateRevision &&
-        !followPlayback &&
-        $('#transcript').classList.contains('active')
-      )
-        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+      align();
     }),
   );
 };

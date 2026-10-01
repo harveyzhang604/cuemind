@@ -212,8 +212,33 @@ async function requireRecord(id) {
   const translated = await migrateMiguAsrTranslations(record);
   const split = migrateMiguAsrSentences(record);
   const aligned = reuseAlignedMiguAsrTranslations(record);
-  if (translated || split || aligned) await store(record);
+  const reconciled = reconcileAsrTranslationStatuses(record);
+  if (translated || split || aligned || reconciled) await store(record);
   return record;
+}
+function asrSentences(record, segment) {
+  // ASR cues can be merged into a sentence crossing a capture boundary. A
+  // start-time-only lookup then leaves the later segment "waiting" forever.
+  return (record.sentences || []).filter(
+    (sentence) => sentence.start < segment.end - 0.1 && sentence.end > segment.start + 0.1,
+  );
+}
+function reconcileAsrTranslationStatuses(record) {
+  if (
+    record.videoInfo?.platform !== 'migu' ||
+    !record.transcriptMeta?.source?.startsWith('whisper')
+  )
+    return false;
+  let changed = false;
+  for (const segment of record.transcriptMeta.asrSegments || []) {
+    if (!['source-ready', 'translation-failed'].includes(segment.status)) continue;
+    const rows = asrSentences(record, segment);
+    if (!rows.length || !rows.every((sentence) => sentence.translation)) continue;
+    segment.status = 'done';
+    delete segment.error;
+    changed = true;
+  }
+  return changed;
 }
 function reuseAlignedMiguAsrTranslations(record) {
   if (
@@ -263,16 +288,6 @@ function reuseAlignedMiguAsrTranslations(record) {
       break;
     }
   }
-  for (const segment of record.transcriptMeta.asrSegments || []) {
-    if (segment.status !== 'source-ready' && segment.status !== 'translation-failed') continue;
-    const rows = record.sentences.filter(
-      (sentence) => sentence.start >= segment.start - 0.75 && sentence.start < segment.end + 0.75,
-    );
-    if (rows.length && rows.every((sentence) => sentence.translation)) {
-      segment.status = 'done';
-      delete segment.error;
-    }
-  }
   record.transcriptMeta.alignedTranslationRevision = 1;
   return true;
 }
@@ -301,12 +316,7 @@ function migrateMiguAsrSentences(record) {
       record.tasks.translation.failed = [];
     }
     const missing = (segment) =>
-      after.some(
-        (sentence) =>
-          sentence.start >= segment.start - 0.75 &&
-          sentence.start < segment.end + 0.75 &&
-          !sentence.translation,
-      );
+      asrSentences(record, segment).some((sentence) => !sentence.translation);
     for (const segment of record.transcriptMeta.asrSegments || [])
       if (segment.status === 'done' && missing(segment)) segment.status = 'source-ready';
   }
@@ -746,23 +756,7 @@ async function route(m) {
         record.videoInfo.platform === 'migu' &&
         record.transcriptMeta.source?.startsWith('whisper')
       ) {
-        let changed = false;
-        for (const segment of record.transcriptMeta.asrSegments || []) {
-          const rows = record.sentences.filter(
-            (sentence) =>
-              sentence.start >= segment.start - 0.75 && sentence.start < segment.end + 0.75,
-          );
-          if (
-            rows.length &&
-            rows.every((sentence) => sentence.translation) &&
-            segment.status !== 'done'
-          ) {
-            segment.status = 'done';
-            delete segment.error;
-            changed = true;
-          }
-        }
-        if (changed) await store(record);
+        if (reconcileAsrTranslationStatuses(record)) await store(record);
       }
       if (signal.aborted) throw new DOMException('已取消', 'AbortError');
       if (['qa', 'explain'].includes(m.capability))
@@ -1231,14 +1225,9 @@ async function translateCaptureSegment(session, segmentId) {
   const errors = [];
   for (;;) {
     const snapshot = structuredClone(session.record);
-    const missing = snapshot.sentences.filter((sentence) => {
+    const missing = asrSentences(snapshot, segment).filter((sentence) => {
       const identity = `${sentence.id}:${sentence.rawText}`;
-      return (
-        sentence.start >= segment.start - 0.75 &&
-        sentence.start < segment.end + 0.75 &&
-        !sentence.translation &&
-        !session.translationAttempted.has(identity)
-      );
+      return !sentence.translation && !session.translationAttempted.has(identity);
     });
     if (!missing.length) break;
     const selected = missing.slice(0, 70);
@@ -1282,9 +1271,7 @@ async function translateCaptureSegment(session, segmentId) {
   await captureWrite(session, async () => {
     const current = captureSegment(session, segmentId);
     if (!current) return;
-    const rows = session.record.sentences.filter(
-      (sentence) => sentence.start >= current.start - 0.75 && sentence.start < current.end + 0.75,
-    );
+    const rows = asrSentences(session.record, current);
     const incomplete = rows.some((row) => !row.translation);
     current.status = incomplete ? 'translation-failed' : 'done';
     if (incomplete && errors.length) current.error = errors[0].slice(0, 240);
@@ -1450,10 +1437,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
         }
         segment.end = capturedEnd;
         segment.status = extra.length ? 'source-ready' : 'no-speech';
-        segment.sentenceCount = r.sentences.filter(
-          (sentence) =>
-            sentence.start >= segment.start - 0.75 && sentence.start < segment.end + 0.75,
-        ).length;
+        segment.sentenceCount = asrSentences(r, segment).length;
         r.transcriptMeta.capturedUntil = Math.max(
           Number(r.transcriptMeta.capturedUntil) || 0,
           segment.end,
