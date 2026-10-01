@@ -27,6 +27,7 @@
     "extension/panel/demo.js",
     "extension/panel/focus-ui.js",
     "extension/panel/index.html",
+    "extension/panel/local-audio.js",
     "extension/panel/prompt-examples.js",
     "extension/panel/settings.html",
     "extension/panel/settings.js",
@@ -44,6 +45,7 @@
     "extension/services/supadata.js",
     "extension/services/tasks.js",
     "extension/services/wbi.js",
+    "extension/storage/audio.js",
     "extension/storage/db.js"
   ],
   "documentation": [
@@ -114,6 +116,7 @@
     "tests/quote.test.js",
     "tests/quote_ui.py",
     "tests/quotes.test.js",
+    "tests/local-audio.test.js",
     "tests/record-recovery.test.js",
     "tests/release-policy.test.js",
     "tests/release_archive.py",

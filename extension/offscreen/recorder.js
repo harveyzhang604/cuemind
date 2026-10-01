@@ -1,3 +1,4 @@
+import { saveAudio } from '../storage/audio.js';
 import { cachedTranscribe as transcribe } from '../services/completion-cache.js';
 import { isQwenAsr, prepareSpeechAudio } from '../services/speech.js';
 
@@ -12,6 +13,8 @@ async function prepare(m) {
   if (state) throw new Error('已有录音或转写正在进行');
   const s = {
     recordId: m.recordId,
+    videoKey: m.videoKey,
+    audioOnly: m.audioOnly === true,
     controller: new AbortController(),
     settings: m.settings,
     queue: Promise.resolve(),
@@ -117,7 +120,26 @@ async function recordChunk(s) {
         discard = s.discardCurrent;
       const endPosition = position(s).catch(() => null);
       s.discardCurrent = false;
-      if (!discard && blob.size >= 1000 && !s.controller.signal.aborted) {
+      // Persist the captured clip before attempting ASR. A provider timeout or
+      // malformed response must not throw away the only copy of the audio.
+      if (blob.size >= 1000) {
+        const saved = endPosition.then(async (endState) => {
+          const end = Math.min(
+            segment.end,
+            Math.max(offset + 0.1, Number(endState?.time) || segment.end),
+          );
+          await saveAudio({
+            videoKey: s.videoKey,
+            recordId: s.recordId,
+            segmentId: segment.id,
+            start: offset,
+            end,
+            blob,
+          });
+          return end;
+        });
+        // Attach a handler immediately while a previous ASR request is running.
+        saved.catch(() => {});
         const waiting = s.pending
           ? send({
               type: 'ASR_PROGRESS',
@@ -132,15 +154,15 @@ async function recordChunk(s) {
         s.queue = s.queue.then(async () => {
           try {
             await waiting;
+            const capturedEnd = await saved;
             if (s.controller.signal.aborted || s.failed) return;
-            const endState = await endPosition;
-            const capturedEnd = Math.min(
-              segment.end,
-              Math.max(offset + 0.1, Number(endState?.time) || segment.end),
-            );
+            // `discard` means only that this clip must not be submitted to ASR
+            // (for example after a recorder error); it is still available for
+            // a later local retry.
+            if (discard) return;
             // A truly silent clip has no words to send to ASR. Ambient sound
             // above this tiny threshold still goes to the model for a decision.
-            if (samples && audioLevel < 0.004) {
+            if (s.audioOnly || (samples && audioLevel < 0.004)) {
               const reply = await send({
                 type: 'ASR_CHUNK',
                 recordId: s.recordId,

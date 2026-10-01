@@ -464,7 +464,13 @@ $('#storage-usage').onclick = async () => {
     const r = await chrome.runtime.sendMessage({ type: 'STORAGE_USAGE' });
     if (!r.ok) throw new Error(r.error);
     const size = (n) => (n == null ? '未知' : (n / 1024 / 1024).toFixed(2) + ' MB');
-    const names = { videos: '字幕与分析', notes: '笔记', chats: '问答', aiCache: '模型响应缓存' };
+    const names = {
+      videos: '字幕与分析',
+      notes: '笔记',
+      chats: '问答',
+      aiCache: '模型响应缓存',
+      audio: '本地音频',
+    };
     const parts = Object.entries(r.data.stores).map(
       ([key, v]) => `${names[key]} ${v.count} 条，内容约 ${size(v.bytes)}`,
     );

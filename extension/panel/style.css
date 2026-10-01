@@ -3227,3 +3227,31 @@ main,
 .settings-page .prompt-technical pre {
   margin-top: 10px;
 }
+
+.local-audio-library {
+  margin: 8px 16px;
+  padding: 12px;
+  border: 1px solid var(--border, #dce5dc);
+  border-radius: 12px;
+}
+.local-audio-library p {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.local-audio-library section {
+  border-top: 1px solid #dce5dc;
+  padding: 12px 0;
+}
+.local-audio-library button {
+  margin: 4px;
+}
+.local-audio-clip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.local-audio-library details {
+  max-height: 280px;
+  overflow: auto;
+}

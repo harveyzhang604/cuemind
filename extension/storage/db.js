@@ -9,13 +9,19 @@ function storageError(error) {
 export function db() {
   if (!connection)
     connection = new Promise((resolve, reject) => {
-      const req = indexedDB.open('cuemind', 2);
+      const req = indexedDB.open('cuemind', 3);
       req.onupgradeneeded = () => {
-        for (const n of ['videos', 'notes', 'chats', 'aiCache'])
+        for (const n of ['videos', 'notes', 'chats', 'aiCache', 'audio'])
           if (!req.result.objectStoreNames.contains(n))
             req.result.createObjectStore(n, { keyPath: 'id' });
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        req.result.onversionchange = () => {
+          req.result.close();
+          connection = null;
+        };
+        resolve(req.result);
+      };
       req.onerror = () => reject(storageError(req.error));
     });
   return connection;
@@ -59,7 +65,7 @@ export async function remove(store, id) {
 // Cursor traversal avoids loading all long-video records at once.
 export async function statistics() {
   const d = await db(),
-    stores = ['videos', 'notes', 'chats', 'aiCache'];
+    stores = ['videos', 'notes', 'chats', 'aiCache', 'audio'];
   const rows = await Promise.all(
     stores.map(
       (name) =>
@@ -73,7 +79,10 @@ export async function statistics() {
             const cursor = request.result;
             if (!cursor) return;
             count++;
-            bytes += new TextEncoder().encode(JSON.stringify(cursor.value)).byteLength;
+            bytes +=
+              name === 'audio'
+                ? cursor.value.bytes || 0
+                : new TextEncoder().encode(JSON.stringify(cursor.value)).byteLength;
             cursor.continue();
           };
           transaction.oncomplete = () => resolve([name, { count, bytes }]);
@@ -89,7 +98,7 @@ export async function statistics() {
 export async function manage(action, transform) {
   const d = await db();
   return new Promise((resolve, reject) => {
-    const t = d.transaction(['videos', 'notes', 'chats', 'aiCache'], 'readwrite');
+    const t = d.transaction(['videos', 'notes', 'chats', 'aiCache', 'audio'], 'readwrite');
     t.oncomplete = resolve;
     t.onerror = () => reject(storageError(t.error));
     t.onabort = () => reject(storageError(t.error) || new Error('本地数据操作已回滚'));
@@ -99,7 +108,7 @@ export async function manage(action, transform) {
     }
     t.objectStore('aiCache').clear();
     if (action === 'reset') {
-      for (const store of ['videos', 'notes', 'chats']) t.objectStore(store).clear();
+      for (const store of ['videos', 'notes', 'chats', 'audio']) t.objectStore(store).clear();
       return;
     }
     t.objectStore('chats').clear();

@@ -1,3 +1,5 @@
+import { audioClips, getAudio, deleteAudio, audioCoverage } from '../storage/audio.js';
+import { LocalAudioPlayer } from './local-audio.js';
 import {
   transcriptText as formatTranscript,
   answerText,
@@ -65,6 +67,10 @@ let availableTracks = [],
   progressVersion = 0,
   captureInfo = null,
   asrElapsedTimer = null;
+let localAudioMode = false;
+const localPlayer = new LocalAudioPlayer((state) => {
+  if (localAudioMode && record) receivePlayerState({ ...state, tabId, localAudio: true });
+}, error);
 const focus = createFocusUI({
   getRecord: () => record,
   getTime: () => time,
@@ -87,6 +93,7 @@ const focus = createFocusUI({
 });
 let automaticTranslationRecordId = null;
 async function maybeTranslateVideo() {
+  if (localAudioMode) return;
   if (
     !ext ||
     !record?.sentences?.length ||
@@ -120,6 +127,7 @@ const demoNotes = () => {
   }
 };
 async function rpc(type, data = {}) {
+  if (type === 'PLAYER_COMMAND' && localAudioMode) return localPlayer.command(data.command);
   if (ext && ['TASK', 'TRANSLATE_NOTES'].includes(type) && !modelReady()) {
     requestSetup('text');
     throw Object.assign(new Error('请先配置文本模型'), { setup: true });
@@ -323,6 +331,9 @@ async function load(refresh = false, trackId) {
   playingRange = null;
   resumeFollow();
   const leaving = leaveVideo();
+  localAudioMode = false;
+  localPlayer.dispose();
+  $('#audio-video-mode').hidden = true;
   busy = false;
   backgroundBusy = false;
   $('#cancel').hidden = true;
@@ -855,6 +866,7 @@ let lastPlayerTick = 0,
   lastContentPaused = null,
   playingRange = null;
 function receivePlayerState(m) {
+  if (localAudioMode && !m.localAudio) return;
   if (m.tabId !== tabId || m.videoKey !== record?.videoKey) return;
   if (m.unavailable && record?.videoInfo.platform === 'migu') {
     $('#play-state').textContent = '播放器重新加载中';
@@ -966,7 +978,7 @@ async function syncPlayerState() {
       command: { action: 'state', videoKey: record.videoKey, ...keyboardConfig() },
     });
     if (gen === generation && id === tabId && revision === playerStateRevision)
-      receivePlayerState({ ...state, tabId: id });
+      receivePlayerState({ ...state, tabId: id, localAudio: localAudioMode });
   } catch (e) {
     if (gen === generation) $('#play-state').textContent = '播放器连接中…';
   } finally {
@@ -2127,7 +2139,7 @@ $('#replay').onclick = guard(async () => {
 $('#loop').onclick = guard(async () => {
   repeat = repeat === 1 ? 3 : repeat === 3 ? -1 : 1;
   $('#loop').textContent = repeat === -1 ? '循环' : `听 ${repeat} 次`;
-  if (ext && tabId && record && record.videoInfo.platform !== 'demo')
+  if (ext && (tabId || localAudioMode) && record && record.videoInfo.platform !== 'demo')
     await rpc('PLAYER_COMMAND', {
       tabId,
       command: { action: 'repeat', repeat, videoKey: record.videoKey },
@@ -2138,7 +2150,7 @@ async function stop() {
   smart = false;
   lastSmartRate = null;
   $('#smart').textContent = '智能速度：关闭';
-  if (ext && tabId && record && record.videoInfo.platform !== 'demo') {
+  if (ext && (tabId || localAudioMode) && record && record.videoInfo.platform !== 'demo') {
     await rpc('PLAYER_COMMAND', { tabId, command: { action: 'stop', videoKey: record.videoKey } });
     if (wasSmart)
       await rpc('PLAYER_COMMAND', {
@@ -2500,7 +2512,9 @@ $('#audio').onchange = guard(async (e) => {
     e.target.value = '';
   }
 });
-async function startCapture(rangeEnd) {
+async function startCapture(rangeEnd, audioOnly = false) {
+  if (localAudioMode)
+    throw new Error('本地学习请在音频库中重试已保存片段；采集新音频请返回在线视频。');
   if (recording) {
     await rpc('CAPTURE_STOP');
     if (captureInfo) captureInfo.stopping = true;
@@ -2508,7 +2522,7 @@ async function startCapture(rangeEnd) {
     return;
   }
   if (!record) throw new Error('请先读取视频信息');
-  if (!speechSettings(settings, record?.videoInfo.platform).asrKey?.trim()) {
+  if (!audioOnly && !speechSettings(settings, record?.videoInfo.platform).asrKey?.trim()) {
     requestSetup('speech');
     return;
   }
@@ -2519,10 +2533,11 @@ async function startCapture(rangeEnd) {
     sourceTab = tabId;
   busy = true;
   try {
-    status('正在检查语音服务连接，通过后开始采集音频…');
+    status(audioOnly ? '正在准备保存当前播放音频…' : '正在检查语音服务连接，通过后开始采集音频…');
     const result = await rpc('CAPTURE_START', {
       recordId: id,
       tabId: sourceTab,
+      audioOnly,
       ...(Number.isFinite(rangeEnd) ? { rangeEnd } : {}),
     });
     recording = true;
@@ -2832,12 +2847,12 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('pagehide', () => {
   saveReading();
   clearTimeout(panelArrow?.timer);
-  if (ext && tabId && record && record.videoInfo.platform !== 'demo')
+  if (ext && (tabId || localAudioMode) && record && record.videoInfo.platform !== 'demo')
     rpc('PLAYER_COMMAND', {
       tabId,
       command: { action: 'keyboard', videoKey: record.videoKey, keyboardEnabled: false },
     }).catch(() => {});
-  if (smart && ext && tabId && record && record.videoInfo.platform !== 'demo')
+  if (smart && ext && (tabId || localAudioMode) && record && record.videoInfo.platform !== 'demo')
     rpc('PLAYER_COMMAND', {
       tabId,
       command: { action: 'rate', rate: normalRate, videoKey: record.videoKey },
@@ -2897,6 +2912,7 @@ document.addEventListener('keydown', (e) => {
 });
 if (ext) {
   chrome.tabs.onActivated.addListener(async (info) => {
+    if (localAudioMode) return;
     try {
       const tab = await chrome.tabs.get(info.tabId);
       if (tab.url?.startsWith(chrome.runtime.getURL(''))) return;
@@ -2904,6 +2920,7 @@ if (ext) {
     } catch {}
   });
   chrome.tabs.onUpdated?.addListener((id, change) => {
+    if (localAudioMode) return;
     if (id !== tabId || !change.url) return;
     const nextKey = keyFromUrl(change.url);
     if (nextKey && !matchesVideoUrl(record?.videoKey || loadingVideoKey, change.url))
@@ -3003,6 +3020,7 @@ if (ext) {
     if (m.event === 'PLAYER_TICK') receivePlayerState(m);
     if (
       m.event === 'PAGE_CHANGED' &&
+      !localAudioMode &&
       m.tabId === tabId &&
       m.videoKey !== (record?.videoKey || loadingVideoKey)
     )
@@ -4124,3 +4142,138 @@ function applyTranslationDisplay() {
     if (cache[s.id]?.source === s.rawText) s.translation = cache[s.id].text;
   }
 }
+
+async function refreshAudioLibrary() {
+  if (!ext) return;
+  const list = $('#audio-library-list');
+  list.textContent = '正在读取本地音频…';
+  const entries = await rpc('AUDIO_LIBRARY');
+  list.replaceChildren();
+  if (!entries.length) {
+    list.textContent = '尚无本地音频。从视频开始音频识别后，会自动保存采集到的片段。';
+    return;
+  }
+  for (const entry of entries) {
+    const box = document.createElement('section'),
+      title = document.createElement('h3');
+    title.textContent = entry.title;
+    const info = document.createElement('p'),
+      summary = audioCoverage(entry.clips);
+    info.textContent = `已保存 ${formatTime(summary.seconds)} · ${(summary.bytes / 1048576).toFixed(1)} MB · ${entry.clips.length} 段`;
+    box.append(
+      title,
+      info,
+      button('打开本地学习', () => openLocalAudio(entry)),
+    );
+    const details = document.createElement('details'),
+      heading = document.createElement('summary');
+    heading.textContent = '音频片段、导出与重试';
+    details.append(heading);
+    for (const clip of entry.clips) {
+      const row = document.createElement('div');
+      row.className = 'local-audio-clip';
+      const label = document.createElement('span');
+      label.textContent = `${formatTime(clip.start)}–${formatTime(clip.end)}`;
+      row.append(
+        label,
+        button('播放', async () => {
+          await openLocalAudio(entry);
+          await seekPlay(clip.start);
+        }),
+        button('导出', async () => {
+          const data = await getAudio(clip.id);
+          if (!data?.blob) throw new Error('音频已删除');
+          const url = URL.createObjectURL(data.blob),
+            a = document.createElement('a');
+          a.href = url;
+          a.download = `CueMind-${Math.floor(clip.start)}-${Math.ceil(clip.end)}.webm`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+        }),
+        button('识别并补译', async () => {
+          if (busy || backgroundBusy || recording) throw new Error('请等待当前任务完成');
+          await openLocalAudio(entry);
+          const id = record.id,
+            gen = generation;
+          busy = true;
+          try {
+            status('正在读取已保存音频并识别…');
+            const data = await getAudio(clip.id);
+            if (!data?.blob) throw new Error('音频已删除');
+            const audio = await prepareSpeechAudio(
+              data.blob,
+              speechSettings(settings, record.videoInfo.platform),
+            );
+            const updated = await rpc('RETRY_SAVED_AUDIO', {
+              recordId: id,
+              clipId: clip.id,
+              dataUrl: await dataURL(audio),
+            });
+            if (gen !== generation) return;
+            record = updated;
+            render();
+            status('原文已保存');
+          } finally {
+            busy = false;
+          }
+          if (gen === generation && modelReady()) {
+            const ids = record.sentences
+              .filter((s) => s.start < clip.end && s.end > clip.start && !s.translation)
+              .map((s) => s.id);
+            for (let i = 0; i < ids.length; i += 70)
+              await task('translation', { selectedIds: ids.slice(i, i + 70) });
+          } else if (gen === generation) status('原文已保存；配置文本模型后可补齐译文。');
+        }),
+      );
+      details.append(row);
+    }
+    box.append(
+      details,
+      button('删除此视频本地音频', async () => {
+        if (recording) throw new Error('请先结束音频采集');
+        if (!confirm('删除此视频已保存的音频？字幕、译文和重点词会保留。删除后需要重新采集音频。'))
+          return;
+        if (localAudioMode && record?.videoKey === entry.videoKey) localPlayer.dispose();
+        await deleteAudio(entry.videoKey);
+        if (localAudioMode && record?.videoKey === entry.videoKey)
+          localPlayer.setClips([], entry.videoKey);
+        await refreshAudioLibrary();
+      }),
+    );
+    list.append(box);
+  }
+}
+async function openLocalAudio(entry) {
+  if (busy || backgroundBusy || recording) throw new Error('请先结束当前任务再切换到本地学习');
+  await leaveVideo();
+  const next = await rpc('GET_RECORD', { recordId: entry.recordId });
+  const clips = await audioClips(next.videoKey);
+  if (!clips.length) throw new Error('本地音频已删除');
+  generation++;
+  record = next;
+  tabId = null;
+  localAudioMode = true;
+  time = clips[0].start;
+  active = -1;
+  listOffset = 0;
+  limit = 70;
+  replaySelection = null;
+  replayArmed = false;
+  playingRange = null;
+  localPlayer.setClips(clips, record.videoKey);
+  $('#audio-video-mode').hidden = false;
+  mode = 'bilingual';
+  resumeFollow();
+  await hydrate();
+  render();
+  await bindPlayer();
+  status('本地音频学习 · 无需打开原视频。识别和补译仍需联网。');
+}
+$('#audio-library-refresh').onclick = guard(refreshAudioLibrary);
+$('#local-audio-library').addEventListener('toggle', () => {
+  if ($('#local-audio-library').open) refreshAudioLibrary().catch(error);
+});
+$('#audio-video-mode').onclick = guard(() => load());
+window.addEventListener('pagehide', () => localPlayer.dispose());
+
+$('#audio-save-current').onclick = guard(() => startCapture(undefined, true));

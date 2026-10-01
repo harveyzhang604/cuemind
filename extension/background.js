@@ -1,3 +1,4 @@
+import { getAudio, audioClips } from './storage/audio.js';
 import { fetchSupadata } from './services/supadata.js';
 import { clearLearningCache, dataActions } from './core/local-data.js';
 import { recoverEquivalentLearning, recoverOrphanedFocus } from './core/record-recovery.js';
@@ -1038,6 +1039,68 @@ async function route(m) {
       restoring = false;
     }
   }
+  if (m.type === 'AUDIO_LIBRARY') {
+    const clips = await audioClips();
+    const videos = await db.all('videos');
+    return [...new Set(clips.map((c) => c.videoKey))]
+      .map((key) => {
+        const group = clips.filter((c) => c.videoKey === key);
+        const record = videos
+          .filter((v) => v.videoKey === key)
+          .sort((a, b) => (b.sentences?.length || 0) - (a.sentences?.length || 0))[0];
+        return record
+          ? { recordId: record.id, videoKey: key, title: record.videoInfo.title, clips: group }
+          : null;
+      })
+      .filter(Boolean);
+  }
+  if (m.type === 'RETRY_SAVED_AUDIO')
+    return locked(m.recordId, 'asr', async (signal) => {
+      const record = await requireRecord(m.recordId),
+        clip = await getAudio(m.clipId);
+      if (!clip || clip.videoKey !== record.videoKey) throw new Error('本地音频不属于当前视频');
+      if (
+        typeof m.dataUrl !== 'string' ||
+        !/^data:audio\/[\w.+-]+;base64,/.test(m.dataUrl) ||
+        m.dataUrl.length > 34 * 1024 * 1024
+      )
+        throw new Error('转写音频格式或大小无效');
+      const cfg = speechSettings(await settings(), record.videoInfo.platform);
+      const segments = await cachedTranscribe(await (await fetch(m.dataUrl)).blob(), cfg, signal);
+      const previous = structuredClone(record);
+      const extra = splitAsrCaptions(
+        normalizeCaptions(
+          segments.map((c) => ({
+            ...c,
+            start: clip.start + c.start,
+            end: Math.min(clip.end, clip.start + c.end),
+          })),
+          'whisper',
+        ),
+      )
+        .filter(
+          (c) =>
+            c.end > c.start &&
+            c.start < clip.end &&
+            !record.rawCaptions.some(
+              (old) =>
+                Math.min(old.end, c.end) - Math.max(old.start, c.start) >= (c.end - c.start) * 0.8,
+            ),
+        )
+        .map((c) => ({ ...c, id: `raw-${crypto.randomUUID()}` }));
+      record.rawCaptions = [...record.rawCaptions, ...extra].sort((a, b) => a.start - b.start);
+      if (record.videoInfo.platform === 'migu') migrateMiguAsrDuplicates(record);
+      record.sentences = localSentences(record.rawCaptions);
+      record.paragraphs = paragraphs(record.sentences);
+      recoverEquivalentLearning(record, [previous]);
+      const segment = record.transcriptMeta.asrSegments?.find((s) => s.id === clip.segmentId);
+      if (segment) {
+        segment.status = asrSentences(record, segment).length ? 'source-ready' : 'no-speech';
+        delete segment.error;
+      }
+      await store(record);
+      return record;
+    });
   if (m.type === 'ASR_FILE')
     return locked(m.recordId, 'asr', async (signal) => {
       const original = await requireRecord(m.recordId);
@@ -1083,8 +1146,11 @@ async function route(m) {
     try {
       const original = await requireRecord(m.recordId),
         cfg = speechSettings(await settings(), original.videoInfo.platform);
-      if (!cfg.asrKey) throw new Error('请先在设置中配置 ASR Key');
-      await checkSpeechNetwork(cfg, session.preflightController.signal);
+      session.audioOnly = m.audioOnly === true;
+      if (!session.audioOnly) {
+        if (!cfg.asrKey) throw new Error('请先在设置中配置 ASR Key');
+        await checkSpeechNetwork(cfg, session.preflightController.signal);
+      }
       let state = await player(m.tabId, { action: 'state', videoKey: original.videoKey });
       if (state.isAd) throw new Error('正在播放广告，请等正片开始后再识别音频。');
       const readyDeadline = Date.now() + 20000;
@@ -1105,7 +1171,7 @@ async function route(m) {
       session.migu = original.videoInfo.platform === 'migu';
       const previousAsr =
         original.transcriptMeta.source?.startsWith('whisper') && original.rawCaptions?.length;
-      if (previousAsr && !Number.isFinite(m.rangeEnd)) {
+      if (previousAsr && !session.audioOnly && !Number.isFinite(m.rangeEnd)) {
         const first = Math.min(...original.rawCaptions.map((cue) => cue.start));
         const last = Math.max(...original.rawCaptions.map((cue) => cue.end));
         const segments = original.transcriptMeta.asrSegments;
@@ -1147,7 +1213,7 @@ async function route(m) {
         videoInfo: original.videoInfo,
         transcriptMeta: { source: 'whisper' },
       });
-      session.seedRecord = previousAsr ? original : null;
+      session.seedRecord = previousAsr || session.audioOnly ? original : null;
       session.settings = cfg;
       session.translationAttempted = new Set();
       session.translationController = new AbortController();
@@ -1184,11 +1250,13 @@ async function route(m) {
           );
         throw e;
       }
-      const record = makeRecord(original.videoInfo, [], {
-        source: 'whisper',
-        language: 'auto',
-        trackId: `recording-${crypto.randomUUID()}`,
-      });
+      const record = session.audioOnly
+        ? structuredClone(original)
+        : makeRecord(original.videoInfo, [], {
+            source: 'whisper',
+            language: 'auto',
+            trackId: `recording-${crypto.randomUUID()}`,
+          });
       if (session.seedRecord) {
         record.rawCaptions = structuredClone(original.rawCaptions);
         record.sentences = structuredClone(original.sentences);
@@ -1235,7 +1303,9 @@ async function route(m) {
         type: 'START',
         streamId,
         settings: cfg,
+        audioOnly: session.audioOnly,
         recordId: record.id,
+        videoKey: record.videoKey,
         plan: session.plan,
       });
       if (!reply?.ok) throw new Error(reply?.error || '音频识别启动失败');
@@ -1583,6 +1653,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
         notify({ event: 'asr', recordId: r.id, record: r, completed: m.completed });
         announceAsrProgress(s);
       });
+      if (s.audioOnly) return;
       s.translationQueue = (s.translationQueue || Promise.resolve())
         .then(() => translateCaptureSegment(s, m.segmentId))
         .catch(async (error) => {

@@ -18,6 +18,16 @@
         <div class="meta"><span id="video-meta"></span></div>
         <span id="platform" hidden></span>
       </header>
+      <details id="local-audio-library" class="local-audio-library">
+        <summary>本地音频库 · 离线学习</summary>
+        <p>
+          采集的音频会分段保存在本机。历史字幕不会自动变成音频；未采集的位置无法离线播放。字幕备份不包含音频，请单独导出。
+        </p>
+        <button id="audio-save-current">保存当前播放音频（不重新识别）</button>
+        <button id="audio-library-refresh">刷新音频库</button>
+        <button id="audio-video-mode" hidden>返回在线视频</button>
+        <div id="audio-library-list"></div>
+      </details>
       <nav class="tabs" aria-label="学习功能">
         <button class="active" data-tab="transcript">字幕</button
         ><button data-tab="study">问答</button><button data-tab="overview">概览</button

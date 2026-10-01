@@ -172,3 +172,7 @@ __pycache__/
 *.pfx
 *.docx
 .DS_Store
+
+!/extension/storage/audio.js
+!/extension/panel/local-audio.js
+!/tests/local-audio.test.js

@@ -45,6 +45,7 @@ test('offscreen recorder advances from a 10-second segment to the next one-minut
   }
   const context = {
     AbortController,
+    saveAudio: async () => {},
     prepareSpeechAudio: async (blob) => blob,
     isQwenAsr: () => false,
     AudioContext: Audio,
@@ -146,6 +147,7 @@ test('a timed-out ASR chunk fails once, stops capture, and preserves a retryable
   let listener;
   let playhead = 0;
   let calls = 0;
+  const savedAudio = [];
   let timerId = 0;
   class Recorder {
     state = 'inactive';
@@ -170,6 +172,7 @@ test('a timed-out ASR chunk fails once, stops capture, and preserves a retryable
   }
   const context = {
     AbortController,
+    saveAudio: async (clip) => savedAudio.push(clip),
     prepareSpeechAudio: async (blob) => blob,
     isQwenAsr: () => false,
     AudioContext: Audio,
@@ -240,6 +243,8 @@ test('a timed-out ASR chunk fails once, stops capture, and preserves a retryable
     ),
   );
   assert.equal(messages.filter((m) => m.type === 'ASR_CHUNK').length, 0);
+  assert.ok(savedAudio.length >= 1, 'a failed ASR request must retain the captured clip');
+  assert.equal(savedAudio[0].start, 0);
   assert.equal(messages.at(-1).type, 'ASR_FINISHED');
   assert.match(messages.at(-1).error, /45 秒/);
 });
@@ -289,6 +294,7 @@ test('a silent chunk is saved as no speech without calling ASR or stopping later
     AudioContext: Audio,
     Blob,
     MediaRecorder: Recorder,
+    saveAudio: async () => {},
     prepareSpeechAudio: async (blob) => blob,
     isQwenAsr: () => true,
     transcribe: async () => {
