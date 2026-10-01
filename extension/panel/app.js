@@ -53,6 +53,7 @@ let availableTracks = [],
   chats = [],
   editing = null,
   busy = false,
+  backgroundBusy = false,
   smart = false,
   recording = false,
   normalRate = 1,
@@ -95,9 +96,11 @@ async function maybeTranslateVideo() {
     !(focus.wantsTranslation || mode === 'bilingual' || mode === 'translated') ||
     !modelReady() ||
     busy ||
+    backgroundBusy ||
     recording ||
     focus.busy ||
     record.id === automaticTranslationRecordId ||
+    record.tasks?.translation?.failed?.length ||
     record.sentences.every((s) => s.translation)
   )
     return;
@@ -181,7 +184,7 @@ function status(text, isError = false, duration = 0) {
   const replayStatus = $('#replay-status');
   replayStatus.hidden = !text;
   replayStatus.textContent = text;
-  if (text && busy)
+  if (text && (busy || backgroundBusy))
     replayStatus.append(button('取消任务', () => rpc('CANCEL', { recordId: record?.id })));
   $('#status').hidden = !text;
   $('#status-text').textContent = text;
@@ -321,6 +324,7 @@ async function load(refresh = false, trackId) {
   resumeFollow();
   const leaving = leaveVideo();
   busy = false;
+  backgroundBusy = false;
   $('#cancel').hidden = true;
   record = null;
   chats = [];
@@ -374,8 +378,10 @@ async function load(refresh = false, trackId) {
       if (gen !== generation) return;
     }
     if (!(await hydrate(gen))) return;
+    await syncTaskState();
     await restoreReading(gen);
-    status(data.needASR ? data.warning || '没有找到可用字幕，可以导入字幕或生成 ASR 字幕。' : '');
+    if (!backgroundBusy)
+      status(data.needASR ? data.warning || '没有找到可用字幕，可以导入字幕或生成 ASR 字幕。' : '');
     await bindPlayer();
     if (data.recovered?.translations || data.recovered?.focus)
       toast(
@@ -953,6 +959,7 @@ async function syncPlayerState() {
     revision = playerStateRevision;
   playerSyncPending = true;
   try {
+    await syncTaskState();
     const state = await rpc('PLAYER_COMMAND', {
       tabId: id,
       command: { action: 'state', videoKey: record.videoKey, ...keyboardConfig() },
@@ -964,6 +971,32 @@ async function syncPlayerState() {
   } finally {
     playerSyncPending = false;
   }
+}
+async function syncTaskState() {
+  if (!ext || !record || busy) return;
+  const id = record.id,
+    gen = generation;
+  const running = await rpc('TASK_STATUS', { recordId: id }).catch(() => null);
+  if (!Array.isArray(running) || gen !== generation || record?.id !== id || busy) return;
+  const wasBusy = backgroundBusy;
+  backgroundBusy = running.length > 0;
+  if (backgroundBusy) {
+    $('#cancel').hidden = false;
+    status(
+      running.some((task) => task.canceling)
+        ? '正在取消后台任务，已完成的内容会保留。'
+        : '后台任务仍在处理；完成后可重试缺失内容，也可点击“取消任务”。',
+    );
+  } else if (wasBusy) {
+    $('#cancel').hidden = true;
+    const saved = await rpc('GET_RECORD', { recordId: id });
+    if (gen !== generation || record?.id !== id || busy) return;
+    record = saved;
+    render();
+    status('后台任务已结束，已更新本机结果。');
+  }
+  updateTranslationPrompt();
+  if (wasBusy !== backgroundBusy) renderCapture();
 }
 setInterval(syncPlayerState, 2000);
 async function bindPlayer(refreshOverlay = false) {
@@ -992,9 +1025,12 @@ async function task(capability, args = {}) {
   }
   if (record.videoInfo.platform === 'demo')
     throw new Error('示例仅用于体验阅读与笔记。请在真实视频中配置模型后运行 AI。');
-  if (busy || captureInfo?.recordId === record.id) throw new Error('当前任务尚未完成，可先取消。');
+  await syncTaskState();
+  if (busy || backgroundBusy || captureInfo?.recordId === record.id)
+    throw new Error('当前任务尚未完成，可先取消。');
   busy = true;
   updateTranslationPrompt();
+  renderCapture();
   renderQaContext();
   $('#cancel').hidden = false;
   status(args.automatic ? '正在翻译整部视频，先处理当前播放位置…' : '正在连接模型…');
@@ -1038,6 +1074,7 @@ async function task(capability, args = {}) {
     if (gen === generation) {
       busy = false;
       updateTranslationPrompt();
+      renderCapture();
       progressVersion++;
       $('#cancel').hidden = true;
       $('#replay-status button')?.remove();
@@ -1942,7 +1979,31 @@ function renderNotes() {
     );
 }
 async function copy(text) {
-  await navigator.clipboard.writeText(text);
+  if (!String(text || '').trim()) throw new Error('当前没有可复制的内容。');
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const focused = document.activeElement;
+    const selection = window.getSelection();
+    const ranges = selection
+      ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i).cloneRange())
+      : [];
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.append(field);
+    try {
+      field.select();
+      if (!document.execCommand('copy')) throw new Error('复制未成功，请重试或使用导出字幕。');
+    } finally {
+      field.remove();
+      focused?.focus({ preventScroll: true });
+      if (selection) {
+        selection.removeAllRanges();
+        ranges.forEach((range) => selection.addRange(range));
+      }
+    }
+  }
   toast('已复制');
 }
 function download(text, extName, mime = 'text/plain') {
@@ -2387,6 +2448,7 @@ $('#audio').onchange = guard(async (e) => {
     id = record.id;
   busy = true;
   updateTranslationPrompt();
+  renderCapture();
   renderQaContext();
   $('#cancel').hidden = false;
   status('正在上传音频并转写…');
@@ -2432,7 +2494,8 @@ async function startCapture(rangeEnd) {
     requestSetup('speech');
     return;
   }
-  if (busy) throw new Error('请先完成当前任务');
+  await syncTaskState();
+  if (busy || backgroundBusy) throw new Error('请先完成当前任务');
   const gen = generation,
     id = record.id,
     sourceTab = tabId;
@@ -2464,7 +2527,8 @@ async function startCapture(rangeEnd) {
 }
 $('#record').onclick = guard(() => startCapture());
 async function retryAsrSegment(segment) {
-  if (busy || recording) throw new Error('请先完成当前任务');
+  await syncTaskState();
+  if (busy || backgroundBusy || recording) throw new Error('请先完成当前任务');
   const target = Math.max(0, segment.start + (segment.start > 0 ? 0.05 : 0));
   await rpc('PLAYER_COMMAND', {
     tabId,
@@ -2572,7 +2636,9 @@ function renderAsrSegments() {
     ? `当前 ${formatTime(activeSegment.start)}–${formatTime(activeSegment.end)}：${asrStatusText(activeSegment)}`
     : recording && nextSegment
       ? `下一段 ${formatTime(nextSegment.start)}–${formatTime(nextSegment.end)}：等待播放`
-      : '当前没有正在处理的片段；已完成结果保存在本机。';
+      : busy || backgroundBusy
+        ? '文本任务正在处理，可取消任务；已完成结果保存在本机。'
+        : '当前没有正在处理的片段；已完成结果保存在本机。';
   const lastResult = segments.findLast((segment) =>
     ['source-ready', 'done', 'translation-failed', 'failed', 'interrupted', 'no-speech'].includes(
       segment.status,
@@ -2615,6 +2681,9 @@ function renderAsrSegments() {
         ),
       );
     }
+    row.querySelectorAll('button').forEach((control) => {
+      control.disabled = busy || backgroundBusy || recording;
+    });
     list.append(row);
   }
 }
@@ -2644,13 +2713,13 @@ function renderCapture() {
       : '';
   renderAsrSegments();
   if (mine || asr) $('#asr-box').hidden = false;
-  $('#record').disabled = recording && (!mine || !!captureInfo?.stopping);
-  $('#audio').disabled = recording;
+  $('#record').disabled = recording ? !mine || !!captureInfo?.stopping : busy || backgroundBusy;
+  $('#audio').disabled = busy || backgroundBusy || recording;
   const missingTranslations = asr
     ? record.sentences.filter((sentence) => !sentence.translation).length
     : 0;
   $('#retry-translation').hidden = !missingTranslations;
-  $('#retry-translation').disabled = busy || recording;
+  $('#retry-translation').disabled = busy || backgroundBusy || recording;
   $('#retry-translation').textContent = `补齐未完成译文（${missingTranslations} 句）`;
   $('#retry-translation-help').hidden = !missingTranslations;
   $('#record').textContent =
@@ -3412,8 +3481,11 @@ function updateTranslationPrompt() {
       ? '正在优先翻译播放位置附近，并继续补齐全片。'
       : '双语译文尚未补齐，已生成部分会保存在本机。'
     : '当前字幕还没有完整译文。';
-  $('#translate').disabled = busy;
-  $('#retry-translation').disabled = busy || recording;
+  $('#translate').disabled = busy || backgroundBusy || recording;
+  $$('#asr-segment-list button').forEach((control) => {
+    control.disabled = busy || backgroundBusy || recording;
+  });
+  $('#retry-translation').disabled = busy || backgroundBusy || recording;
   $('#translate').textContent = busy ? '正在翻译…' : replayArmed ? '翻译选中字幕' : '补齐全片译文';
 }
 function replayBounds() {

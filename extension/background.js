@@ -617,6 +617,10 @@ async function route(m) {
           completed: capture.completed || 0,
         }
       : null;
+  if (m.type === 'TASK_STATUS')
+    return [...tasks.values()]
+      .filter((task) => task.recordId === m.recordId)
+      .map((task) => ({ capability: task.capability, canceling: task.controller.signal.aborted }));
   if (m.type === 'INSPECT') return page(m.tabId);
   if (m.type === 'PLAYER_COMMAND') return player(m.tabId, m.command);
   if (m.type === 'LOAD') {
