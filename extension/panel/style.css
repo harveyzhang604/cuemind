@@ -3113,9 +3113,8 @@ main,
   overflow-wrap: anywhere;
 }
 .asr-segment span {
-  flex: 0 0 95px;
-  min-width: 0;
-  overflow-wrap: anywhere;
+  flex: 0 0 145px;
+  white-space: nowrap;
 }
 .asr-segment button {
   flex: 0 0 auto;
