@@ -2420,7 +2420,7 @@ $('#audio').onchange = guard(async (e) => {
     e.target.value = '';
   }
 });
-async function startCapture() {
+async function startCapture(rangeEnd) {
   if (recording) {
     await rpc('CAPTURE_STOP');
     if (captureInfo) captureInfo.stopping = true;
@@ -2439,7 +2439,11 @@ async function startCapture() {
   busy = true;
   try {
     status('正在检查语音服务连接，通过后开始采集音频…');
-    const result = await rpc('CAPTURE_START', { recordId: id, tabId: sourceTab });
+    const result = await rpc('CAPTURE_START', {
+      recordId: id,
+      tabId: sourceTab,
+      ...(Number.isFinite(rangeEnd) ? { rangeEnd } : {}),
+    });
     recording = true;
     captureInfo = { recordId: result.id, tabId: sourceTab, completed: 0 };
     renderCapture();
@@ -2458,11 +2462,18 @@ async function startCapture() {
     if (gen === generation) busy = false;
   }
 }
-$('#record').onclick = guard(startCapture);
+$('#record').onclick = guard(() => startCapture());
 async function retryAsrSegment(segment) {
   if (busy || recording) throw new Error('请先完成当前任务');
   const target = Math.max(0, segment.start + (segment.start > 0 ? 0.05 : 0));
-  await seekPlay(target);
+  await rpc('PLAYER_COMMAND', {
+    tabId,
+    command: { action: 'seek', time: target, videoKey: record.videoKey },
+  });
+  await rpc('PLAYER_COMMAND', {
+    tabId,
+    command: { action: 'pause', videoKey: record.videoKey },
+  });
   const deadline = Date.now() + 8000;
   for (;;) {
     const state = await rpc('PLAYER_COMMAND', {
@@ -2479,7 +2490,7 @@ async function retryAsrSegment(segment) {
     if (Date.now() >= deadline) throw new Error('视频跳转后未准备好音频，请稍后重试。');
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
-  await startCapture();
+  await startCapture(segment.end);
 }
 const asrLabels = {
   pending: '未开始',

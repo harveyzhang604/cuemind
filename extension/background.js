@@ -1047,7 +1047,18 @@ async function route(m) {
       session.settings = cfg;
       session.translationAttempted = new Set();
       session.translationController = new AbortController();
-      session.plan = planAsrSegments(state.time, state.duration, () => crypto.randomUUID()).map(
+      const rangeEnd = Number.isFinite(m.rangeEnd)
+        ? Math.min(state.duration, Math.max(state.time + 2, m.rangeEnd))
+        : state.duration;
+      if (
+        Number.isFinite(m.rangeEnd) &&
+        (m.rangeEnd <= session.startTime || m.rangeEnd > state.duration + 1)
+      )
+        throw new Error('重试片段的时间范围无效');
+      session.retryRange = Number.isFinite(m.rangeEnd)
+        ? { start: session.startTime, end: Math.min(state.duration, m.rangeEnd) }
+        : null;
+      session.plan = planAsrSegments(state.time, rangeEnd, () => crypto.randomUUID()).map(
         (segment) => ({ ...segment, sessionId: session.id }),
       );
       if (!session.plan.length) throw new Error('视频末尾没有足够音频可识别。');
@@ -1407,12 +1418,23 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
           translationCaches: structuredClone(r.translationCaches || {}),
           tasks: structuredClone(r.tasks || {}),
         };
-        const extra = splitAsrCaptions(
+        const recognized = splitAsrCaptions(
           normalizeCaptions(m.segments, 'whisper').map((cue) => ({
             ...cue,
             id: `raw-${crypto.randomUUID()}`,
           })),
         );
+        // A very short failed interval needs at least two seconds of audio for
+        // the recorder, but only retain words from the requested gap.
+        const extra = s.retryRange
+          ? recognized
+              .filter((cue) => cue.start < s.retryRange.end && cue.end > s.retryRange.start)
+              .map((cue) => ({
+                ...cue,
+                start: Math.max(cue.start, s.retryRange.start),
+                end: Math.min(cue.end, s.retryRange.end),
+              }))
+          : recognized;
         r.rawCaptions = [...r.rawCaptions, ...extra].sort((a, b) => a.start - b.start);
         r.sentences = localSentences(r.rawCaptions);
         r.paragraphs = paragraphs(r.sentences);
@@ -1435,7 +1457,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
             error: '音频尚未播放，可从此位置继续',
           });
         }
-        segment.end = capturedEnd;
+        segment.end = s.retryRange ? Math.min(capturedEnd, s.retryRange.end) : capturedEnd;
         segment.status = extra.length ? 'source-ready' : 'no-speech';
         segment.sentenceCount = asrSentences(r, segment).length;
         r.transcriptMeta.capturedUntil = Math.max(
