@@ -151,7 +151,7 @@ export async function completion(settings, system, input, signal, capability = '
     body.response_format = { type: 'json_object' };
   }
   let last;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
@@ -189,10 +189,30 @@ export async function completion(settings, system, input, signal, capability = '
       return parseJson(result);
     } catch (e) {
       if (signal?.aborted) throw new DOMException('已取消', 'AbortError');
-      if (e.name === 'AbortError') throw new Error('模型请求超时，请重试或换用更快模型。');
+      if (e.name === 'AbortError') {
+        e = new Error('模型请求超时，请重试或换用更快模型。');
+        e.retryable = true;
+      }
+      if (e instanceof TypeError && /Failed to fetch|network|fetch failed/i.test(e.message)) {
+        e = new Error('模型服务连接失败，请检查网络或稍后重试。');
+        e.retryable = true;
+      }
       last = e;
-      if (!e.retryable || attempt === 1) throw e;
-      await new Promise((r) => setTimeout(r, 1000));
+      if (!e.retryable || attempt === 2) throw e;
+      await new Promise((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new DOMException('已取消', 'AbortError'));
+        };
+        const timer = setTimeout(
+          () => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          },
+          800 * 2 ** attempt,
+        );
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);

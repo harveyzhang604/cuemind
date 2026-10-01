@@ -9,13 +9,14 @@ import { inspectPage, canReuseTranscript } from './services/platform.js';
 import {
   normalizeCaptions,
   parseJSON3,
+  splitAsrCaptions,
   splitTimedCaptions,
   videoKey,
   SCHEMA_VERSION,
 } from './core/transcript.js';
 import { localSentences, paragraphs, mergeStudy } from './core/sentence.js';
 import { defaults, endpoint } from './services/ai-provider.js';
-import { runTask } from './services/tasks.js';
+import { groundedTranslation, runTask } from './services/tasks.js';
 import { explanationCacheKey } from './services/explanation-cache.js';
 import { cachedCompletion, cachedTranscribe } from './services/completion-cache.js';
 import * as db from './storage/db.js';
@@ -181,7 +182,8 @@ async function player(tabId, data) {
   return r.data;
 }
 function makeRecord(info, raw, meta, id) {
-  raw = splitTimedCaptions(raw);
+  const miguAsr = info.platform === 'migu' && meta.source?.startsWith('whisper');
+  raw = miguAsr ? splitAsrCaptions(raw) : splitTimedCaptions(raw);
   const sentences = localSentences(raw);
   return {
     id: id || `${videoKey(info)}:${meta.trackId || 'default'}`,
@@ -193,9 +195,7 @@ function makeRecord(info, raw, meta, id) {
     transcriptMeta: {
       ...meta,
       generatedAt: new Date().toISOString(),
-      ...(info.platform === 'migu' && meta.source?.startsWith('whisper')
-        ? { translationRevision: 2 }
-        : {}),
+      ...(miguAsr ? { translationRevision: 2, sentenceRevision: 4 } : {}),
     },
     schemaVersion: SCHEMA_VERSION,
     updatedAt: Date.now(),
@@ -209,8 +209,109 @@ async function store(record) {
 async function requireRecord(id) {
   const record = await db.get('videos', id);
   if (!record) throw new Error('请先读取或导入字幕。');
-  if (await migrateMiguAsrTranslations(record)) await store(record);
+  const translated = await migrateMiguAsrTranslations(record);
+  const split = migrateMiguAsrSentences(record);
+  const aligned = reuseAlignedMiguAsrTranslations(record);
+  if (translated || split || aligned) await store(record);
   return record;
+}
+function reuseAlignedMiguAsrTranslations(record) {
+  if (
+    record.videoInfo?.platform !== 'migu' ||
+    !record.transcriptMeta?.source?.startsWith('whisper') ||
+    record.transcriptMeta.alignedTranslationRevision === 1
+  )
+    return false;
+  const groups = new Map();
+  for (const sentence of record.sentences || []) {
+    const parent = sentence.id.replace(/:part:\d+$/, '');
+    const group = groups.get(parent) || [];
+    group.push(sentence);
+    groups.set(parent, group);
+  }
+  const segmenter = new Intl.Segmenter('zh', { granularity: 'sentence' });
+  for (const [parent, group] of groups) {
+    if (group.length < 2 || group.every((sentence) => sentence.translation)) continue;
+    for (const cache of Object.values(record.translationCaches || {})) {
+      const old = cache[parent];
+      if (
+        !old?.text ||
+        !old?.source ||
+        old.source.replace(/\s+/g, '') !==
+          group
+            .map((s) => s.rawText)
+            .join('')
+            .replace(/\s+/g, '')
+      )
+        continue;
+      const translations = [...segmenter.segment(old.text)]
+        .map((part) => part.segment.trim())
+        .filter(Boolean);
+      if (
+        translations.length !== group.length ||
+        !group.every(
+          (sentence, index) =>
+            groundedTranslation(sentence.rawText, translations[index]) &&
+            translations[index].length <= Math.max(12, sentence.rawText.length * 2),
+        )
+      )
+        continue;
+      group.forEach((sentence, index) => {
+        sentence.translation ||= translations[index];
+        cache[sentence.id] = { source: sentence.rawText, text: sentence.translation };
+      });
+      break;
+    }
+  }
+  for (const segment of record.transcriptMeta.asrSegments || []) {
+    if (segment.status !== 'source-ready' && segment.status !== 'translation-failed') continue;
+    const rows = record.sentences.filter(
+      (sentence) => sentence.start >= segment.start - 0.75 && sentence.start < segment.end + 0.75,
+    );
+    if (rows.length && rows.every((sentence) => sentence.translation)) {
+      segment.status = 'done';
+      delete segment.error;
+    }
+  }
+  record.transcriptMeta.alignedTranslationRevision = 1;
+  return true;
+}
+function migrateMiguAsrSentences(record) {
+  if (
+    record.videoInfo?.platform !== 'migu' ||
+    !record.transcriptMeta?.source?.startsWith('whisper') ||
+    record.transcriptMeta.sentenceRevision === 4
+  )
+    return false;
+  const before = record.sentences || [];
+  const afterRaw = splitAsrCaptions(record.rawCaptions || []);
+  const after = localSentences(afterRaw);
+  const oldById = new Map(before.map((sentence) => [sentence.id, sentence]));
+  for (const sentence of after) {
+    const old = oldById.get(sentence.id);
+    if (old?.rawText === sentence.rawText && old.translation)
+      sentence.translation = old.translation;
+  }
+  if (afterRaw.length !== record.rawCaptions.length || after.length !== before.length) {
+    record.rawCaptions = afterRaw;
+    record.sentences = after;
+    record.paragraphs = paragraphs(after);
+    if (record.tasks?.translation) {
+      record.tasks.translation.done = [];
+      record.tasks.translation.failed = [];
+    }
+    const missing = (segment) =>
+      after.some(
+        (sentence) =>
+          sentence.start >= segment.start - 0.75 &&
+          sentence.start < segment.end + 0.75 &&
+          !sentence.translation,
+      );
+    for (const segment of record.transcriptMeta.asrSegments || [])
+      if (segment.status === 'done' && missing(segment)) segment.status = 'source-ready';
+  }
+  record.transcriptMeta.sentenceRevision = 4;
+  return true;
 }
 async function migrateMiguAsrTranslations(record) {
   if (
@@ -521,11 +622,20 @@ async function route(m) {
       )
         return result;
       const cfg = await settings();
-      const migrated = await migrateMiguAsrTranslations(result.record);
+      const migratedTranslations = await migrateMiguAsrTranslations(result.record);
+      const migratedSentences = migrateMiguAsrSentences(result.record);
+      const alignedTranslations = reuseAlignedMiguAsrTranslations(result.record);
       const recovered = recoverEquivalentLearning(result.record, await db.all('videos'), {
         translationSignature: translationSignature(cfg, result.record),
       });
-      if (migrated || recovered.translations || recovered.focus || recovered.cacheEntries)
+      if (
+        migratedTranslations ||
+        migratedSentences ||
+        alignedTranslations ||
+        recovered.translations ||
+        recovered.focus ||
+        recovered.cacheEntries
+      )
         await store(result.record);
       return {
         ...result,
@@ -1175,9 +1285,10 @@ async function translateCaptureSegment(session, segmentId) {
     const rows = session.record.sentences.filter(
       (sentence) => sentence.start >= current.start - 0.75 && sentence.start < current.end + 0.75,
     );
-    current.status =
-      errors.length || rows.some((row) => !row.translation) ? 'translation-failed' : 'done';
-    if (errors.length) current.error = errors[0].slice(0, 240);
+    const incomplete = rows.some((row) => !row.translation);
+    current.status = incomplete ? 'translation-failed' : 'done';
+    if (incomplete && errors.length) current.error = errors[0].slice(0, 240);
+    if (!incomplete) delete current.error;
     current.sentenceCount = rows.length;
     await store(session.record);
     announceAsrProgress(session);
@@ -1309,8 +1420,13 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
           translationCaches: structuredClone(r.translationCaches || {}),
           tasks: structuredClone(r.tasks || {}),
         };
-        const extra = normalizeCaptions(m.segments, 'whisper');
-        r.rawCaptions = normalizeCaptions([...r.rawCaptions, ...extra], 'whisper');
+        const extra = splitAsrCaptions(
+          normalizeCaptions(m.segments, 'whisper').map((cue) => ({
+            ...cue,
+            id: `raw-${crypto.randomUUID()}`,
+          })),
+        );
+        r.rawCaptions = [...r.rawCaptions, ...extra].sort((a, b) => a.start - b.start);
         r.sentences = localSentences(r.rawCaptions);
         r.paragraphs = paragraphs(r.sentences);
         recoverEquivalentLearning(r, [previous, ...(s.seedRecord ? [s.seedRecord] : [])], {

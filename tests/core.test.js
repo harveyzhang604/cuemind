@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {normalizeCaptions,splitTimedCaptions,parseSubtitle,parseJSON3,videoKey,formatTime,timestampUrl} from '../extension/core/transcript.js';
+import {normalizeCaptions,splitTimedCaptions,splitAsrCaptions,parseSubtitle,parseJSON3,videoKey,formatTime,timestampUrl} from '../extension/core/transcript.js';
 import {localSentences,boundarySentences,paragraphs,alignTranslations,validateRanges,mergeStudy,activeIndex,batches,relatedStudySentences} from '../extension/core/sentence.js';
 import {retrieve,qaContext,validateAnswer} from '../extension/core/retrieval.js';
 import {markdown,mindmap,subtitles} from '../extension/core/export.js';
@@ -29,6 +29,15 @@ test('a long timed caption becomes spoken sentences within its original interval
  assert.ok(list.every(s=>s.estimatedTiming));
  assert.deepEqual(list.flatMap(s=>s.sourceIds),raw.map(s=>s.id));
 });
+test('ASR raw cues split missing-space sentences with unique stable provenance',()=>{
+ const raw=normalizeCaptions([{start:0,end:3,text:'Already done.'},{start:3,end:19,text:'He was great.And then he left.He came back.'}],'whisper');
+ const split=splitAsrCaptions(raw),result=localSentences(split);
+ assert.deepEqual(result.map(s=>s.rawText),['Already done.','He was great.','And then he left.','He came back.']);
+ assert.equal(split[0].id,'raw-0');assert.equal(split[1].id,'raw-1');
+ assert.equal(new Set(split.map(s=>s.id)).size,split.length);
+ assert.deepEqual(result.flatMap(s=>s.sourceIds),split.map(s=>s.id));
+ assert.equal(result.at(-1).end,19);
+});
 test('retrieval includes selected caption and nearby context',()=>{const list=Array.from({length:500},(_,i)=>({id:`s${i}`,start:i*10,end:i*10+9,rawText:i===450?'Transformer attention explained':'Other topic '.repeat(10)}));const c=retrieve(list,'transformer',0,['s450'],1500);assert.ok(c.some(s=>s.id==='s450'));assert.ok(c.some(s=>s.id==='s451'));assert.ok(c.reduce((n,s)=>n+s.rawText.length,0)<1500);});
 test('question scopes keep the selected sentence local and whole-video followups retrievable',()=>{const list=Array.from({length:100},(_,i)=>({id:`s${i}`,start:i*10,end:i*10+8,rawText:i===80?'Think directly in English.':`Unrelated line ${i}.`}));assert.deepEqual(qaContext(list,{scope:'sentence',selectedIds:['s80']}).map(s=>s.id),['s79','s80','s81']);const segment=qaContext(list,{scope:'segment',selectedIds:['s80']});assert.ok(segment.some(s=>s.id==='s80'));assert.ok(segment.every(s=>s.start>=770&&s.start<=838));assert.ok(qaContext(list,{scope:'video',question:'why',history:[{question:'Think directly in English'}]}).some(s=>s.id==='s80'));});
 test('citation requires both supplied ID and exact source quote',()=>{const a=validateAnswer({answer:'Answer',citations:[{sentenceId:sentences[0].id,quote:'Hello'},{sentenceId:sentences[0].id,quote:'made up'},{sentenceId:'fake',quote:'Hello'}]},sentences);assert.equal(a.citations.length,1);assert.equal(a.citations[0].start,0);});
@@ -41,6 +50,11 @@ test('model endpoints disallow plaintext external hosts and embedded credentials
 test('structured output parses fenced JSON and rejects prose',()=>{assert.deepEqual(parseJson('```json\n{"a":1}\n```'),{a:1});assert.throws(()=>parseJson('hello'));});
 test('Bilibili WBI signing keeps deterministic key order and known MD5',()=>{assert.equal(WBI.md5(''),'d41d8cd98f00b204e9800998ecf8427e');const signed=WBI.signParams({b:2,a:'hello world'}, {imgKey:'a'.repeat(32),subKey:'b'.repeat(32)}, 1700000000);assert.equal(signed.wts,1700000000);assert.deepEqual(Object.keys(signed).sort(),['a','b','w_rid','wts']);assert.match(WBI.signedUrl('https://api.bilibili.com/x/player/wbi/v2',{b:2,a:'hello world'},{imgKey:'a'.repeat(32),subKey:'b'.repeat(32)},1700000000),/w_rid=[0-9a-f]{32}/);});
 test('AI provider uses native Gemini API body and secret header',async()=>{const original=global.fetch;let captured;global.fetch=async(url,init)=>{captured={url,...init};return new Response(JSON.stringify({candidates:[{content:{parts:[{text:'{"answer":"ok"}'}]}}]}));};try{const r=await completion({provider:'gemini',baseUrl:'https://example.com/v1beta',model:'test',apiKey:'secret'},'system',{text:'source'});assert.equal(r.answer,'ok');assert.ok(!captured.url.includes('secret'));assert.equal(captured.headers['x-goog-api-key'],'secret');assert.ok(JSON.parse(captured.body).system_instruction);}finally{global.fetch=original;}});
+test('a transient model network failure retries and returns the successful response',async()=>{
+ const original=global.fetch;let calls=0;
+ global.fetch=async()=>{calls++;if(calls===1)throw new TypeError('Failed to fetch');return new Response(JSON.stringify({choices:[{message:{content:'{"answer":"ok"}'}}]}));};
+ try{const result=await completion({apiKey:'fixture'},'system',{text:'source'});assert.equal(result.answer,'ok');assert.equal(calls,2);}finally{global.fetch=original;}
+});
 test('translation partial results persist and retry only missing batches',async()=>{const original=global.fetch;global.fetch=async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({translations:[{id:sentences[0].id,text:'translated'}]})}}]}));let saves=0;try{const result=await runTask({videoInfo:{title:'test'},sentences:structuredClone(sentences)},'translation',{apiKey:'test'},{},new AbortController().signal,async()=>saves++,()=>{});assert.equal(result.partial,true);assert.equal(result.record.sentences[0].translation,'translated');assert.equal(saves,1);}finally{global.fetch=original;}});
 test('cancellation rejects before performing model request',async()=>{const c=new AbortController();c.abort();await assert.rejects(()=>runTask({videoInfo:{title:'x'},sentences},'translation',{}, {},c.signal,async()=>{},()=>{}),{name:'AbortError'});});
 

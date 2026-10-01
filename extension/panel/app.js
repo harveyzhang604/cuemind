@@ -3292,6 +3292,27 @@ $('#first-subtitle').onclick = () => {
     }),
   );
 };
+$('#last-subtitle').onclick = () => {
+  if (!record?.sentences?.length) return;
+  closeTools();
+  pauseFollow();
+  openSearch(false);
+  listOffset = Math.max(0, record.sentences.length - 70);
+  limit = 70;
+  renderSentences();
+  const revision = locateRevision;
+  window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      if (
+        revision === locateRevision &&
+        !followPlayback &&
+        $('#transcript').classList.contains('active')
+      )
+        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+    }),
+  );
+};
 for (const id of ['open-replay', 'export', 'refresh', 'copy-transcript'])
   $('#' + id).addEventListener('click', closeTools);
 document.addEventListener('pointerdown', (e) => {

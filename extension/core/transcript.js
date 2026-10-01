@@ -33,7 +33,16 @@ export function splitTimedCaptions(raw) {
   const segmenter = new Intl.Segmenter(undefined, { granularity: 'sentence' });
   const pieces = [];
   for (const cue of raw) {
-    const parts = [...segmenter.segment(cue.text)].map((x) => x.segment.trim()).filter(Boolean);
+    // Some ASR providers omit the space after a full stop. Segmenter then
+    // treats several spoken sentences as one cue ("great.And ...").
+    const spaced = cue.text.replace(/\.([A-Z][a-z])/g, (match, next, offset, text) => {
+      const word = text
+        .slice(0, offset)
+        .match(/([A-Za-z]+)$/)?.[1]
+        ?.toLowerCase();
+      return ['mr', 'mrs', 'ms', 'dr', 'prof', 'st'].includes(word) ? match : `. ${next}`;
+    });
+    const parts = [...segmenter.segment(spaced)].map((x) => x.segment.trim()).filter(Boolean);
     const duration = cue.end - cue.start;
     if (parts.length < 2 || duration < parts.length * 0.35) {
       pieces.push(cue);
@@ -57,6 +66,19 @@ export function splitTimedCaptions(raw) {
     }
   }
   return pieces.map((cue, i) => ({ ...cue, id: `raw-${i}` }));
+}
+// Unlike splitTimedCaptions, retain existing cue IDs. Live ASR appends new
+// chunks over time, so renumbering earlier cues would break sentence/notes
+// references and backup provenance.
+export function splitAsrCaptions(raw) {
+  return raw.flatMap((cue) => {
+    const parts = splitTimedCaptions([cue]);
+    if (parts.length < 2) return [cue];
+    return parts.map((part, index) => ({
+      ...part,
+      id: index ? `${cue.id}:part:${index}` : cue.id,
+    }));
+  });
 }
 export function joinText(items) {
   return items

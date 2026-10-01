@@ -4,8 +4,10 @@ import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import {speechSettings} from '../extension/services/speech.js';
 import {defaults} from '../extension/services/ai-provider.js';
+import {groundedTranslation} from '../extension/services/tasks.js';
+import {validateBackup} from '../extension/core/backup.js';
 import {validateSettings} from '../extension/services/settings.js';
-import {normalizeCaptions,splitTimedCaptions,videoKey,SCHEMA_VERSION} from '../extension/core/transcript.js';
+import {normalizeCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION} from '../extension/core/transcript.js';
 import {localSentences,paragraphs} from '../extension/core/sentence.js';
 import {keyFromUrl,matchesVideoUrl} from '../extension/core/video.js';
 import {captureClockProblem,planAsrSegments,skipRecognizedAudio} from '../extension/core/asr-progress.js';
@@ -18,7 +20,7 @@ import {explanationCacheKey} from '../extension/services/explanation-cache.js';
 async function fixture(existingStorage){
  const noop=()=>{},listeners=[],stores={videos:new Map(),notes:new Map(),chats:new Map()},storage=existingStorage||{settings:{...defaults,transcriptProvider:'supadata',supadataApiKey:'fixture'}};
  const inspection={info:{platform:'youtube',videoId:'sHieyY4r0-k',page:1,title:'Fixture',audioLanguage:'en',url:'https://www.youtube.com/watch?v=sHieyY4r0-k'},tracks:[]};
- const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,splitTimedCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,inspection,
+ const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,inspection,
  db:{get:async(name,id)=>structuredClone(stores[name].get(id)),all:async name=>structuredClone([...stores[name].values()]),put:async(name,value)=>{stores[name].set(value.id,structuredClone(value));return value;},remove:async(name,id)=>stores[name].delete(id),updateNote:async(id,expected,change)=>{const n=stores.notes.get(id);if(n?.updatedAt!==expected)return null;const next={...n,...change};stores.notes.set(id,structuredClone(next));return next;},manage:async(action,transform)=>{if(action==='reset'){Object.values(stores).forEach(s=>s.clear());}else if(action==='delete-notes')stores.notes.clear();else{stores.chats.clear();for(const [id,r]of stores.videos)stores.videos.set(id,transform(r));}}},
  chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},tabs:{get:async()=>({url:inspection.info.url}),sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
  context.cachedCompletion=(...args)=>context.completion(...args.slice(0,5));
@@ -239,6 +241,54 @@ test('Migu audio recognition resumes saved audio but invalidates legacy unground
  await event({type:'ASR_FINISHED',recordId:next.id});
  assert.equal(f.stores.videos.get(next.id).transcriptMeta.capturedUntil,80);
  assert.equal(seeks.length,1,'continuous recognition does not rewind the player');
+});
+
+test('saved Migu ASR paragraphs split on load without discarding correct short translations',async()=>{
+ const f=await fixture();
+ f.inspection.info={platform:'migu',videoId:'120000587094',page:967772705,title:'Fixture',duration:200,url:'https://www.miguvideo.com/p/live/120000587094'};
+ const loaded=await f.route({type:'LOAD',tabId:1});
+ const old=f.stores.videos.get(loaded.record.id);
+ old.rawCaptions=normalizeCaptions([{start:1,end:3,text:'Already done.'},{start:3,end:18,text:'He was great.And then he left.He came back.'}],'whisper');
+ old.sentences=localSentences(old.rawCaptions);
+ old.sentences[0].translation='已经完成。';old.sentences[1].translation='旧段落译文。';
+ old.paragraphs=paragraphs(old.sentences);
+ old.transcriptMeta={...old.transcriptMeta,source:'whisper',translationRevision:2,asrSegments:[{id:'seg',start:1,end:18,status:'done'}]};
+ old.tasks={translation:{signature:'same-model',done:[0],failed:[]}};
+ f.stores.videos.set(old.id,old);
+ const next=await f.route({type:'GET_RECORD',recordId:old.id});
+ assert.deepEqual(next.sentences.map(s=>s.rawText),['Already done.','He was great.','And then he left.','He came back.']);
+ assert.equal(next.sentences[0].translation,'已经完成。');
+ assert.ok(next.sentences.slice(1).every(s=>!s.translation));
+ assert.equal(next.transcriptMeta.asrSegments[0].status,'source-ready');
+ assert.equal(next.tasks.translation.signature,'same-model');
+ assert.equal(next.tasks.translation.done.length,0);
+ assert.equal(validateBackup({format:'cuemind',version:1,videos:[structuredClone(next)],notes:[],chats:[]}).videos.length,1);
+ assert.equal((await f.route({type:'GET_RECORD',recordId:old.id})).sentences.length,4);
+});
+test('matching old bilingual paragraphs reuse sentence-aligned translations without model calls',async()=>{
+ const f=await fixture();
+ f.inspection.info={platform:'migu',videoId:'120000587094',page:967772705,title:'Fixture',duration:100,url:'https://www.miguvideo.com/p/live/120000587094'};
+ const loaded=await f.route({type:'LOAD',tabId:1});
+ const old=f.stores.videos.get(loaded.record.id);
+ const source='He was great.And then he left.He came back.';
+ const translation='他很出色。然后他离开了。后来他回来了。';
+ old.rawCaptions=normalizeCaptions([{start:3,end:18,text:source}],'whisper');
+ old.sentences=localSentences(old.rawCaptions);
+ old.sentences[0].translation=translation;
+ old.transcriptMeta={...old.transcriptMeta,source:'whisper',translationRevision:2};
+ old.translationCaches={'same-model':{[old.sentences[0].id]:{source,text:translation}}};
+ f.stores.videos.set(old.id,old);
+ const result=await f.route({type:'GET_RECORD',recordId:old.id});
+ assert.equal(result.sentences.length,3);
+ assert.deepEqual(Array.from(result.sentences,s=>s.translation),['他很出色。','然后他离开了。','后来他回来了。']);
+ assert.equal(result.translationCaches['same-model'][result.sentences[2].id].source,'He came back.');
+ const migrated=f.stores.videos.get(old.id);
+ migrated.sentences.forEach(s=>delete s.translation);
+ migrated.transcriptMeta.alignedTranslationRevision=undefined;
+ migrated.translationCaches={'same-model':{[old.sentences[0].id]:{source,text:translation}}};
+ f.stores.videos.set(old.id,migrated);
+ const recovered=await f.route({type:'GET_RECORD',recordId:old.id});
+ assert.equal(recovered.sentences.filter(s=>s.translation).length,3,'already-split records can reuse the old paragraph cache');
 });
 
 test('unreachable ASR stops before capturing audio or replacing saved captions', async()=>{

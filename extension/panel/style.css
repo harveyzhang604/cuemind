@@ -3090,6 +3090,9 @@ main,
 #asr-segment-list {
   max-height: 230px;
   overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
   margin-top: 8px;
 }
 .asr-segment {
@@ -3102,8 +3105,16 @@ main,
   font-variant-numeric: tabular-nums;
 }
 .asr-segment strong {
+  flex: 1;
+  min-width: 0;
   font-weight: 600;
   text-align: right;
+  overflow-wrap: anywhere;
+}
+.asr-segment span {
+  flex: 0 0 95px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .asr-segment[data-status='failed'] strong,
 .asr-segment[data-status='translation-failed'] strong,
