@@ -142,7 +142,10 @@
           repeat,
           seeking: v.seeking,
           readyState: v.readyState,
-          unavailable: miguPage && v.readyState < 2,
+          // Seeking normally drops readyState while the next frame buffers.
+          // Only an actual media error means playback is unavailable.
+          unavailable: !!v.error,
+          mediaErrorCode: v.error?.code || null,
           captureLocked,
           focusCaptionsEnabled: !!focusConfig?.enabled,
           focusCaptionsClosed: focusClosed,

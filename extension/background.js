@@ -998,14 +998,25 @@ async function route(m) {
       await checkSpeechNetwork(cfg, session.preflightController.signal);
       let state = await player(m.tabId, { action: 'state', videoKey: original.videoKey });
       if (state.isAd) throw new Error('正在播放广告，请等正片开始后再识别音频。');
-      if (state.unavailable || (state.readyState != null && state.readyState < 2))
-        throw new Error('播放器尚未载入可播放的视频音频，请开始播放后再识别。');
+      const readyDeadline = Date.now() + 20000;
+      while (true) {
+        if (session.preflightController.signal.aborted)
+          throw new DOMException('已取消', 'AbortError');
+        if (state.mediaErrorCode)
+          throw new Error(`播放器报告媒体错误（代码 ${state.mediaErrorCode}），本次尚未调用 ASR。`);
+        if (!state.seeking && (state.readyState == null || state.readyState >= 2)) break;
+        if (Date.now() >= readyDeadline)
+          throw new Error('等待音频缓冲超时（20 秒），本次尚未调用 ASR。可先播放该片段，再重试。');
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        state = await player(m.tabId, { action: 'state', videoKey: original.videoKey });
+        if (state.isAd) throw new Error('正在播放广告，请等正片开始后再识别音频。');
+      }
       if (!Number.isFinite(state.duration) || state.time >= state.duration)
         throw new Error('请先将视频移动到要转写的位置');
       session.migu = original.videoInfo.platform === 'migu';
       const previousAsr =
         original.transcriptMeta.source?.startsWith('whisper') && original.rawCaptions?.length;
-      if (previousAsr) {
+      if (previousAsr && !Number.isFinite(m.rangeEnd)) {
         const first = Math.min(...original.rawCaptions.map((cue) => cue.start));
         const last = Math.max(...original.rawCaptions.map((cue) => cue.end));
         const segments = original.transcriptMeta.asrSegments;

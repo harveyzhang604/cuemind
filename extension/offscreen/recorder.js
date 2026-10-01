@@ -59,10 +59,27 @@ async function recordChunk(s) {
   try {
     const segment = s.plan[s.nextIndex];
     if (!segment) return stop(s);
-    const current = await position(s);
-    if (s.stopping) return finish(s);
-    if (current.unavailable || (current.readyState != null && current.readyState < 2))
-      throw new Error('播放器正在重新加载，音频采集已停止；此前完成的字幕已保留。');
+    let current = await position(s);
+    const readyDeadline = Date.now() + 20000;
+    while (true) {
+      if (s.stopping) return finish(s);
+      if (current.mediaErrorCode || current.unavailable)
+        throw new Error('播放器报告媒体错误，音频采集已停止；此前完成的字幕已保留。');
+      if (
+        !current.paused &&
+        !current.seeking &&
+        (current.readyState == null || current.readyState >= 2)
+      )
+        break;
+      if (Date.now() >= readyDeadline)
+        throw new Error(
+          current.paused
+            ? '视频仍处于暂停状态，尚未采集该段音频；请恢复播放后重试。'
+            : '等待音频缓冲超时（20 秒）；此前完成的字幕已保留。',
+        );
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      current = await position(s);
+    }
     const chunks = [];
     const offset = current.time;
     if (segment.end - offset < 1) return stop(s);

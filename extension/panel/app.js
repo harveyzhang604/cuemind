@@ -2529,29 +2529,41 @@ $('#record').onclick = guard(() => startCapture());
 async function retryAsrSegment(segment) {
   await syncTaskState();
   if (busy || backgroundBusy || recording) throw new Error('请先完成当前任务');
-  const target = Math.max(0, segment.start + (segment.start > 0 ? 0.05 : 0));
+  const gen = generation,
+    id = record.id,
+    sourceTab = tabId,
+    videoKey = record.videoKey;
+  const target = Math.max(0, segment.start);
+  status('正在定位该片段，等待音频缓冲…');
   await rpc('PLAYER_COMMAND', {
-    tabId,
-    command: { action: 'seek', time: target, videoKey: record.videoKey },
+    tabId: sourceTab,
+    command: { action: 'seek', time: target, videoKey },
   });
+  if (gen !== generation || record?.id !== id || tabId !== sourceTab) return;
   await rpc('PLAYER_COMMAND', {
-    tabId,
-    command: { action: 'pause', videoKey: record.videoKey },
+    tabId: sourceTab,
+    command: { action: 'pause', videoKey },
   });
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + 20000;
   for (;;) {
+    if (gen !== generation || record?.id !== id || tabId !== sourceTab) return;
     const state = await rpc('PLAYER_COMMAND', {
-      tabId,
-      command: { action: 'state', videoKey: record.videoKey },
+      tabId: sourceTab,
+      command: { action: 'state', videoKey },
     });
-    if (state.unavailable) throw new Error('视频当前无法播放，请先恢复播放再重试这段音频。');
+    if (gen !== generation || record?.id !== id || tabId !== sourceTab) return;
+    if (state.mediaErrorCode)
+      throw new Error(`播放器报告媒体错误（代码 ${state.mediaErrorCode}），本次尚未调用 ASR。`);
     if (
       !state.seeking &&
       (state.readyState == null || state.readyState >= 2) &&
       Math.abs(state.time - target) < 0.75
     )
       break;
-    if (Date.now() >= deadline) throw new Error('视频跳转后未准备好音频，请稍后重试。');
+    if (Date.now() >= deadline)
+      throw new Error(
+        '等待该片段音频缓冲超时（20 秒），本次尚未调用 ASR。可先在该位置播放，再重试。',
+      );
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
   await startCapture(segment.end);
