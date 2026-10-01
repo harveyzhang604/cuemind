@@ -49,6 +49,8 @@ with sync_playwright() as p:
   panel.wait_for_function("playbackEvents.some(m=>m.event==='play'&&m.paused===false)")
   command(action='pause')
   panel.wait_for_function("playbackEvents.some(m=>m.event==='pause'&&m.paused===true)")
+  command(action='seek',time=3)
+  panel.wait_for_function("() => playbackEvents.some(m=>m.event==='seeked'&&m.paused===true)")
   assert panel.evaluate('(id)=>playbackEvents.every(m=>m.tabId===id)',tid)
   # Exit a live looping range without rewinding, then toggle ordinary playback.
   command(action='range',start=1,end=3,repeat=-1,pre=0,post=0)
