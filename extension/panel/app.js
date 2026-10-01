@@ -1017,7 +1017,7 @@ async function task(capability, args = {}) {
     const reasons = [...new Set((result.errors || []).map((x) => x.error))];
     if (result.partial)
       status(
-        `${result.errors.length} 批未完成：${reasons.slice(0, 2).join('；')}${reasons.length > 2 ? '；另有其他错误' : ''}。再次点击原按钮可重试。`,
+        `${result.errors.length} 批未完成：${reasons.slice(0, 2).join('；')}${reasons.length > 2 ? '；另有其他错误' : ''}${capability === 'translation' ? ' 点击“补齐未完成译文”可只重试缺失的译文。' : ' 再次点击原按钮可重试。'}`,
         true,
       );
     else {
@@ -2024,6 +2024,7 @@ $('#translate').onclick = guard(() => {
       : {},
   );
 });
+$('#retry-translation').onclick = guard(() => task('translation'));
 $('#analyze-study').onclick = guard(() => task('study'));
 $('#analyze-overview').onclick = guard(() => task('analysis'));
 $('#cancel').onclick = guard(() => rpc('CANCEL', { recordId: record?.id }));
@@ -2419,7 +2420,7 @@ $('#audio').onchange = guard(async (e) => {
     e.target.value = '';
   }
 });
-$('#record').onclick = guard(async () => {
+async function startCapture() {
   if (recording) {
     await rpc('CAPTURE_STOP');
     if (captureInfo) captureInfo.stopping = true;
@@ -2456,7 +2457,30 @@ $('#record').onclick = guard(async () => {
   } finally {
     if (gen === generation) busy = false;
   }
-});
+}
+$('#record').onclick = guard(startCapture);
+async function retryAsrSegment(segment) {
+  if (busy || recording) throw new Error('请先完成当前任务');
+  const target = Math.max(0, segment.start + (segment.start > 0 ? 0.05 : 0));
+  await seekPlay(target);
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    const state = await rpc('PLAYER_COMMAND', {
+      tabId,
+      command: { action: 'state', videoKey: record.videoKey },
+    });
+    if (state.unavailable) throw new Error('视频当前无法播放，请先恢复播放再重试这段音频。');
+    if (
+      !state.seeking &&
+      (state.readyState == null || state.readyState >= 2) &&
+      Math.abs(state.time - target) < 0.75
+    )
+      break;
+    if (Date.now() >= deadline) throw new Error('视频跳转后未准备好音频，请稍后重试。');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  await startCapture();
+}
 const asrLabels = {
   pending: '未开始',
   capturing: '正在采集音频',
@@ -2556,6 +2580,30 @@ function renderAsrSegments() {
       el('span', '', `${index + 1}. ${formatTime(segment.start)}–${formatTime(segment.end)}`),
       el('strong', '', `${asrStatusText(segment)}${segment.error ? ` · ${segment.error}` : ''}`),
     );
+    if (['source-ready', 'translation-failed'].includes(segment.status)) {
+      const selectedIds = record.sentences
+        .filter(
+          (sentence) =>
+            !sentence.translation &&
+            sentence.start < segment.end - 0.1 &&
+            sentence.end > segment.start + 0.1,
+        )
+        .map((sentence) => sentence.id);
+      if (selectedIds.length && selectedIds.length <= 70)
+        row.append(
+          button(
+            '补译此段',
+            guard(() => task('translation', { selectedIds })),
+          ),
+        );
+    } else if (['failed', 'interrupted', 'pending'].includes(segment.status)) {
+      row.append(
+        button(
+          '从此处识别',
+          guard(() => retryAsrSegment(segment)),
+        ),
+      );
+    }
     list.append(row);
   }
 }
@@ -2587,6 +2635,13 @@ function renderCapture() {
   if (mine || asr) $('#asr-box').hidden = false;
   $('#record').disabled = recording && (!mine || !!captureInfo?.stopping);
   $('#audio').disabled = recording;
+  const missingTranslations = asr
+    ? record.sentences.filter((sentence) => !sentence.translation).length
+    : 0;
+  $('#retry-translation').hidden = !missingTranslations;
+  $('#retry-translation').disabled = busy || recording;
+  $('#retry-translation').textContent = `补齐未完成译文（${missingTranslations} 句）`;
+  $('#retry-translation-help').hidden = !missingTranslations;
   $('#record').textContent =
     recording && !mine
       ? '另一视频正在转写'
@@ -3347,6 +3402,7 @@ function updateTranslationPrompt() {
       : '双语译文尚未补齐，已生成部分会保存在本机。'
     : '当前字幕还没有完整译文。';
   $('#translate').disabled = busy;
+  $('#retry-translation').disabled = busy || recording;
   $('#translate').textContent = busy ? '正在翻译…' : replayArmed ? '翻译选中字幕' : '补齐全片译文';
 }
 function replayBounds() {

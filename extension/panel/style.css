@@ -3098,6 +3098,7 @@ main,
 .asr-segment {
   display: flex;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 5px 0;
   border-top: 1px solid var(--line);
@@ -3115,6 +3116,12 @@ main,
   flex: 0 0 95px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+.asr-segment button {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 2px 7px;
+  font-size: 11px;
 }
 .asr-segment[data-status='failed'] strong,
 .asr-segment[data-status='translation-failed'] strong,

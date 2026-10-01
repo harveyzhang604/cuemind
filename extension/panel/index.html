@@ -167,7 +167,12 @@
               ><label class="button file-label"
                 >导入音频转写<input id="audio" type="file" accept="audio/*,video/*" hidden
               /></label>
+              <button id="retry-translation" class="button" hidden>补齐未完成译文</button>
             </div>
+            <p id="retry-translation-help" class="small" hidden>
+              仅重试缺失的译文，复用本机已完成的原文和译文；不会重新采集音频或调用
+              ASR。调用文本模型可能产生 API 费用。
+            </p>
             <button id="configure-asr" class="text-btn">配置语音服务</button>
             <details class="capture-details">
               <summary>音频识别与导入位置</summary>

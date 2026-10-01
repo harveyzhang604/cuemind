@@ -32,6 +32,16 @@ with preview_server() as base,sync_playwright() as p:
  page.locator('#record').click();expect(page.locator('#record')).to_be_disabled();expect(page.locator('#capture-controls')).to_contain_text('正在完成剩余识别')
  page.evaluate("listeners.forEach(f=>f({type:'EVENT',event:'asr-finished',recordId:'capture'}))")
  expect(page.locator('#record')).to_have_text('从当前进度继续识别');expect(page.locator('#record')).to_be_enabled();expect(page.locator('#capture-summary')).to_contain_text('00:10–00:30')
+ page.evaluate("fixture.sentences[0].translation='';fixture.transcriptMeta.asrSegments[0].status='source-ready';listeners.forEach(f=>f({type:'EVENT',event:'asr',recordId:'capture',record:fixture,completed:1}))")
+ expect(page.locator('#retry-translation')).to_be_visible();expect(page.locator('#retry-translation')).to_have_text('补齐未完成译文（1 句）')
+ expect(page.locator('.asr-segment[data-status="source-ready"] button')).to_have_text('补译此段')
+ expect(page.locator('.asr-segment[data-status="failed"] button')).to_have_text('从此处识别')
+ capture_count=page.evaluate('calls.filter(m=>m.type==="CAPTURE_START").length')
+ page.locator('#retry-translation').click();expect(page.locator('#setup-needed')).to_be_visible();assert page.evaluate('calls.filter(m=>m.type==="CAPTURE_START").length')==capture_count
+ page.locator('#setup-needed-close').click()
+ page.evaluate('''() => {window.playerTime=10;const send=chrome.runtime.sendMessage;chrome.runtime.sendMessage=async m=>{if(m.type==='PLAYER_COMMAND'&&m.command.action==='seek'){playerTime=m.command.time;calls.push(m);return {ok:true,data:{}};}if(m.type==='PLAYER_COMMAND'&&m.command.action==='state')return {ok:true,data:{time:playerTime,paused:false,rate:1,readyState:4,videoKey:'youtube:fixture:1'}};return send(m)};}''')
+ page.locator('.asr-segment[data-status="failed"] button').click();expect(page.locator('#capture-controls')).to_contain_text('正在采集播放音频并识别字幕')
+ assert page.evaluate('calls.some(m=>m.type==="PLAYER_COMMAND"&&m.command.action==="seek"&&Math.abs(m.command.time-30.05)<0.01)')
  assert not errors,errors
  settings=b.new_page();settings.goto(base+'/extension/panel/settings.html');expect(settings.locator('#asr-provider')).to_have_value('openai');settings.locator('#asrKey').fill('OLD-FIXTURE');settings.locator('#asr-provider').select_option('groq');expect(settings.locator('#asrUrl')).to_have_value('https://api.groq.com/openai/v1');expect(settings.locator('#asrModel')).to_have_value('whisper-large-v3-turbo');expect(settings.locator('#asrKey')).to_have_value('');settings.locator('#asrUrl').fill('https://custom.example/v1');expect(settings.locator('#asr-provider')).to_have_value('custom')
  settings.locator('#asrRouting').select_option('platform');expect(settings.locator('#domestic-asr-settings')).to_be_visible()
