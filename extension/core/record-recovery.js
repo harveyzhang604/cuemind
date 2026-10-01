@@ -188,3 +188,51 @@ export function recoverEquivalentLearning(record, records, { translationSignatur
   }
   return { record, translations, focus, cacheEntries };
 }
+
+// Legacy deduplication changed the transcript fingerprint without migrating the
+// cache. Recover only marks whose sentence ID, text and exact offsets still match.
+export function recoverOrphanedFocus(record) {
+  const entries = Object.values(record.focusCaches || {});
+  if (record.focusCache && record.focusConfig)
+    entries.push({ ...record.focusConfig, cache: record.focusCache });
+  for (const backup of record.transcriptMeta?.duplicateCaptionBackup || [])
+    entries.push(...Object.values(backup.focusCaches || {}));
+  let recovered = 0;
+  for (const entry of entries) {
+    if (!entry?.cache?.marks?.length) continue;
+    const key = focusCacheKey(record.sentences, entry);
+    if (entry.cache.key === key) continue;
+    const marks = validateFocusMarks(record.sentences, entry.cache.marks);
+    if (!marks.length) continue;
+    record.focusCaches ||= {};
+    const current = record.focusCaches[key]?.cache;
+    const merged = new Map(
+      (current?.marks || []).map((mark) => [
+        JSON.stringify([mark.sentenceId, mark.start, mark.end]),
+        mark,
+      ]),
+    );
+    for (const mark of marks) {
+      const id = JSON.stringify([mark.sentenceId, mark.start, mark.end]);
+      if (!merged.has(id)) {
+        merged.set(id, mark);
+        recovered++;
+      }
+    }
+    record.focusCaches[key] = {
+      goal: entry.goal,
+      customGoal: entry.customGoal,
+      cache: normalizeFocusCache(record.sentences, entry, {
+        ...entry.cache,
+        key,
+        marks: [...merged.values()],
+        done: current?.done || [],
+        failed: [],
+        status: 'partial',
+      }),
+    };
+  }
+  if (recovered && record.focusConfig)
+    record.focusCache = focusCacheFor(record, record.focusConfig);
+  return recovered;
+}

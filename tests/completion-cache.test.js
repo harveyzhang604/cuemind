@@ -62,6 +62,7 @@ test('automatic Migu translation repairs an omitted line alone and uses short ba
  global.fetch=async(_url,init)=>{
   const input=JSON.parse(JSON.parse(init.body).messages.at(-1).content);
   requests.push(input);
+  if (!input.items) return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({faithful:false})}}]}));
   const translations=input.items.map(item=>({id:item.id,text:first&&item.id==='s0'?'2026 UFC 赛事介绍。':'准确译文。'}));
   first=false;
   return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({translations})}}]}));
@@ -99,6 +100,7 @@ test('long ASR paragraph falls back to clause translations while retaining its s
  global.fetch=async(_url,init)=>{
   const input=JSON.parse(JSON.parse(init.body).messages.at(-1).content);
   inputs.push(input);
+  if (!input.items) return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({faithful:false})}}]}));
   const translations=input.items.map(item=>({id:item.id,text:item.id.includes(':part:')?'这是对应的小段译文。':'2027 年无关赛事介绍。'}));
   return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({translations})}}]}));
  };
@@ -109,6 +111,6 @@ test('long ASR paragraph falls back to clause translations while retaining its s
   assert.equal(record.sentences[0].start,274);
   assert.equal(record.sentences[0].end,295);
   assert.equal(record.sentences[0].translation,parts.map(()=> '这是对应的小段译文。').join(' '));
-  assert.equal(inputs.filter(input=>input.items[0].id.includes(':part:')).length,parts.length);
+  assert.equal(inputs.filter(input=>input.items?.[0]?.id.includes(':part:')).length,parts.length);
  }finally{global.fetch=previous;}
 });

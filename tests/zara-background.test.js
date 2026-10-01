@@ -7,20 +7,20 @@ import {defaults} from '../extension/services/ai-provider.js';
 import {groundedTranslation} from '../extension/services/tasks.js';
 import {validateBackup} from '../extension/core/backup.js';
 import {validateSettings} from '../extension/services/settings.js';
-import {normalizeCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION} from '../extension/core/transcript.js';
+import {normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION} from '../extension/core/transcript.js';
 import {localSentences,paragraphs} from '../extension/core/sentence.js';
 import {keyFromUrl,matchesVideoUrl} from '../extension/core/video.js';
 import {captureClockProblem,planAsrSegments,skipRecognizedAudio} from '../extension/core/asr-progress.js';
 import {canReuseTranscript} from '../extension/services/platform.js';
 import {taskConflict} from '../extension/core/task-lock.js';
 import {clearLearningCache,dataActions} from '../extension/core/local-data.js';
-import {recoverEquivalentLearning} from '../extension/core/record-recovery.js';
+import {recoverEquivalentLearning,recoverOrphanedFocus} from '../extension/core/record-recovery.js';
 import {selectFocusConfig} from '../extension/core/focus.js';
 import {explanationCacheKey} from '../extension/services/explanation-cache.js';
 async function fixture(existingStorage){
  const noop=()=>{},listeners=[],stores={videos:new Map(),notes:new Map(),chats:new Map()},storage=existingStorage||{settings:{...defaults,transcriptProvider:'supadata',supadataApiKey:'fixture'}};
  const inspection={info:{platform:'youtube',videoId:'sHieyY4r0-k',page:1,title:'Fixture',audioLanguage:'en',url:'https://www.youtube.com/watch?v=sHieyY4r0-k'},tracks:[]};
- const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,inspection,
+ const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,
  db:{get:async(name,id)=>structuredClone(stores[name].get(id)),all:async name=>structuredClone([...stores[name].values()]),put:async(name,value)=>{stores[name].set(value.id,structuredClone(value));return value;},remove:async(name,id)=>stores[name].delete(id),updateNote:async(id,expected,change)=>{const n=stores.notes.get(id);if(n?.updatedAt!==expected)return null;const next={...n,...change};stores.notes.set(id,structuredClone(next));return next;},manage:async(action,transform)=>{if(action==='reset'){Object.values(stores).forEach(s=>s.clear());}else if(action==='delete-notes')stores.notes.clear();else{stores.chats.clear();for(const [id,r]of stores.videos)stores.videos.set(id,transform(r));}}},
  chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},tabs:{get:async()=>({url:inspection.info.url}),sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
  context.cachedCompletion=(...args)=>context.completion(...args.slice(0,5));

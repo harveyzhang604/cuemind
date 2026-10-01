@@ -300,7 +300,16 @@ export function createFocusUI({
       partsById.clear();
       return;
     }
-    if (record.id === recordId) return;
+    if (record.id === recordId) {
+      if (
+        cacheBook?.sentences !== record.sentences ||
+        (record.focusCache?.key === focusCacheKey(record.sentences, config) &&
+          JSON.stringify(record.focusCache.marks) !== JSON.stringify(cache?.marks))
+      ) {
+        await refresh(true);
+      }
+      return;
+    }
     if (analysisRun) abandonAnalysis(analysisRun);
     analysisRun = null;
     stopPolling();

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {recoverEquivalentLearning} from '../extension/core/record-recovery.js';
+import {recoverEquivalentLearning,recoverOrphanedFocus} from '../extension/core/record-recovery.js';
 import {selectFocusConfig} from '../extension/core/focus.js';
 
 const sentences=()=>[
@@ -81,4 +81,19 @@ test('translations from a different model or target language stay out of the act
   assert.equal(result.cacheEntries,1);
   assert.equal(fresh.sentences[0].translation,undefined);
   assert.equal(fresh.translationCaches.chinese.s1.text,'认真听。');
+});
+
+
+
+test('orphaned focus marks survive transcript fingerprint changes without applying stale offsets',()=>{
+ const r=record('same');selectFocusConfig(r,{goal:'custom',customGoal:'sports'});
+ r.focusCache.marks=[
+  {sentenceId:'s1',start:0,end:6,text:'Listen',level:3},
+  {sentenceId:'s2',start:0,end:4,text:'Fake',level:2}
+ ];
+ r.sentences.push({id:'s3',rawText:'New caption.',start:4,end:6});
+ assert.equal(recoverOrphanedFocus(r),1);
+ assert.equal(r.focusCache.marks[0].text,'Listen');
+ assert.equal(r.focusCache.marks.length,1);
+ assert.equal(recoverOrphanedFocus(r),0);
 });

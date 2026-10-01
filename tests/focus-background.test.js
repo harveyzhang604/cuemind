@@ -1,3 +1,4 @@
+import {recoverOrphanedFocus} from '../extension/core/record-recovery.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -11,7 +12,7 @@ import {validateSettings} from '../extension/services/settings.js';
 test('real background router allows QA/note during focus, rejects duplicate/writers, and cancels only focus',async()=>{
  const stores={videos:new Map([['r',{id:'r',videoKey:'youtube:abc:1',videoInfo:{title:'Example'},sentences:[{id:'s',rawText:'Capital matters.',start:0,end:2}]}]]),notes:new Map(),chats:new Map()};
  const storage={};let resolveFocus,focusSignal,resolveQa,qaSignal;const noop=()=>{};
- const context={console,AbortController,DOMException,URL,Date,Map,Set,crypto:globalThis.crypto,setInterval:noop,normalizeFocusConfig,normalizeFocusCache,selectFocusConfig,focusState,taskConflict,defaults,validateSettings,
+ const context={recoverOrphanedFocus,console,AbortController,DOMException,URL,Date,Map,Set,crypto:globalThis.crypto,setInterval:noop,normalizeFocusConfig,normalizeFocusCache,selectFocusConfig,focusState,taskConflict,defaults,validateSettings,
  db:{get:async(store,id)=>structuredClone(stores[store].get(id)),all:async store=>structuredClone([...stores[store].values()]),put:async(store,value)=>{stores[store].set(value.id,structuredClone(value));return value;},remove:async(store,id)=>stores[store].delete(id)},
  chrome:{storage:{local:{setAccessLevel:noop,get:async key=>({[key]:storage[key]}),set:async value=>Object.assign(storage,value)}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},tabs:{onRemoved:{addListener:noop}},runtime:{sendMessage:async()=>{},onMessage:{addListener:noop}}},
  runTask:async(record,capability,config,args,signal)=>{if(capability==='focus'){focusSignal=signal;return new Promise(r=>resolveFocus=r);}if(capability==='qa'){qaSignal=signal;return new Promise(r=>resolveQa=r);}return {};}

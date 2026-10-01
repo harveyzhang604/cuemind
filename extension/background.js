@@ -1,6 +1,6 @@
 import { fetchSupadata } from './services/supadata.js';
 import { clearLearningCache, dataActions } from './core/local-data.js';
-import { recoverEquivalentLearning } from './core/record-recovery.js';
+import { recoverEquivalentLearning, recoverOrphanedFocus } from './core/record-recovery.js';
 import { normalizeFocusConfig, selectFocusConfig } from './core/focus.js';
 import { focusState } from './services/focus.js';
 import { taskConflict } from './core/task-lock.js';
@@ -212,10 +212,12 @@ async function requireRecord(id) {
   if (!record) throw new Error('请先读取或导入字幕。');
   const translated = await migrateMiguAsrTranslations(record);
   const split = migrateMiguAsrSentences(record);
+  const restoredFocus = recoverOrphanedFocus(record);
   const deduplicated = migrateMiguAsrDuplicates(record);
   const aligned = reuseAlignedMiguAsrTranslations(record);
   const reconciled = reconcileAsrTranslationStatuses(record);
-  if (translated || split || deduplicated || aligned || reconciled) await store(record);
+  if (translated || split || restoredFocus || deduplicated || aligned || reconciled)
+    await store(record);
   return record;
 }
 function asrSentences(record, segment) {
@@ -336,7 +338,30 @@ function migrateMiguAsrDuplicates(record) {
       .filter((sentence) => sentence.translation)
       .flatMap((sentence) => sentence.sourceIds || []),
   );
-  const { kept, removed } = deduplicateAsrCaptions(record.rawCaptions || [], preferred);
+  const input = record.rawCaptions || [];
+  const previousConflicts = (record.transcriptMeta.duplicateCaptionBackup || []).flatMap(
+    (backup) => backup.rawCaptions || [],
+  );
+  const initial = deduplicateAsrCaptions(input, preferred, previousConflicts);
+  const sentences = localSentences(initial.kept);
+  const variants = deduplicateAsrCaptions(
+    sentences.map((sentence) => ({
+      ...sentence,
+      text: sentence.rawText,
+    })),
+    new Set(
+      sentences
+        .filter((sentence) => sentence.sourceIds.every((id) => preferred.has(id)))
+        .map((sentence) => sentence.id),
+    ),
+    [...previousConflicts, ...initial.removed],
+  );
+  const duplicateIds = new Set(variants.removed.flatMap((sentence) => sentence.sourceIds));
+  // Never remove a source cue that is also used by the retained sentence.
+  const retainedIds = new Set(variants.kept.flatMap((sentence) => sentence.sourceIds));
+  const kept = initial.kept.filter((cue) => !duplicateIds.has(cue.id) || retainedIds.has(cue.id));
+  const keptIds = new Set(kept.map((cue) => cue.id));
+  const removed = input.filter((cue) => !keptIds.has(cue.id));
   if (!removed.length) return false;
   const learningBefore = {
     ...record,
@@ -688,6 +713,7 @@ async function route(m) {
       const cfg = await settings();
       const migratedTranslations = await migrateMiguAsrTranslations(result.record);
       const migratedSentences = migrateMiguAsrSentences(result.record);
+      const restoredFocus = recoverOrphanedFocus(result.record);
       const deduplicated = migrateMiguAsrDuplicates(result.record);
       const alignedTranslations = reuseAlignedMiguAsrTranslations(result.record);
       const recovered = recoverEquivalentLearning(result.record, await db.all('videos'), {
@@ -697,6 +723,7 @@ async function route(m) {
         migratedTranslations ||
         migratedSentences ||
         deduplicated ||
+        restoredFocus ||
         alignedTranslations ||
         recovered.translations ||
         recovered.focus ||
@@ -711,14 +738,16 @@ async function route(m) {
     loadFlights.set(key, work);
     return work;
   }
-  if (m.type === 'DEDUPLICATE_ASR') {
-    assertAvailable(m.recordId);
-    const record = await db.get('videos', m.recordId);
-    if (!record) throw new Error('请先读取字幕');
-    const before = record.sentences.length;
-    if (migrateMiguAsrDuplicates(record)) await store(record);
-    return { record, removed: Math.max(0, before - record.sentences.length) };
-  }
+  if (m.type === 'DEDUPLICATE_ASR')
+    return locked(m.recordId, 'deduplicate', async () => {
+      const record = await db.get('videos', m.recordId);
+      if (!record) throw new Error('请先读取字幕');
+      const before = record.sentences.length;
+      const restoredFocus = recoverOrphanedFocus(record);
+      const deduplicated = migrateMiguAsrDuplicates(record);
+      if (deduplicated || restoredFocus) await store(record);
+      return { record, removed: Math.max(0, before - record.sentences.length), restoredFocus };
+    });
   if (m.type === 'IMPORT') {
     if (restoring) throw new Error('正在恢复备份');
     const raw = normalizeCaptions(m.raw, 'import');
