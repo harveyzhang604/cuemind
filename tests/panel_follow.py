@@ -72,18 +72,17 @@ with preview_server() as base,sync_playwright() as p:
  expect(page.locator('#play-state')).to_have_text('广告播放中')
  expect(page.locator('#play-time')).to_have_text('09:00')
  expect(page.locator('.sentence.active .sentence-body')).to_have_text('Sentence 180')
- # Manual reading never times out into forced follow.
+ # Manual reading pauses following briefly, then live playback resumes it.
  page.mouse.wheel(0,-250)
  expect(page.locator('#transcript')).to_have_attribute('data-follow-playback','false')
  page.wait_for_timeout(700)
  before=page.evaluate('scrollY')
- page.wait_for_timeout(6500)
  page.evaluate('clock=30')
  expect(page.locator('#play-time')).to_have_text('00:30',timeout=6000)
- after=page.evaluate('scrollY');assert abs(after-before)<5,{'before':before,'after':after,'followButtonVisible':page.locator('#transcript').get_attribute('data-follow-playback')=='false'}
- page.locator('.transcript-more>summary').click();page.locator('#locate').click()
+ after=page.evaluate('scrollY');assert abs(after-before)<5,{'before':before,'after':after}
+ expect(page.locator('#transcript')).to_have_attribute('data-follow-playback','true',timeout=8000)
  expect(page.locator('.sentence.active .sentence-body')).to_have_text('Sentence 10')
- expect(page.locator('#transcript')).to_have_attribute('data-follow-playback','true')
+ assert page.locator('.sentence.active').is_visible()
  # Browsing away while paused: resume must relocate even if the cue ID is unchanged.
  def tick(t,paused,**extra):
   page.evaluate("m=>listeners.forEach(f=>f({type:'EVENT',event:'PLAYER_TICK',tabId:1,videoKey:'youtube:fixture:1',rate:1,...m}))",{'time':t,'paused':paused,**extra})

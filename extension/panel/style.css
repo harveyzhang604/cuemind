@@ -1288,6 +1288,15 @@ blockquote#note-source {
   width: 28px;
   height: 28px;
 }
+.compact-video #open-history {
+  display: grid;
+  place-items: center;
+  color: var(--green);
+}
+.compact-video #open-history svg {
+  width: 19px;
+  height: 19px;
+}
 .compact-video .meta {
   gap: 8px;
   font-size: 10px;
@@ -2279,6 +2288,32 @@ dialog {
 .focus-dialog textarea {
   resize: vertical;
 }
+.focus-goal-manager {
+  margin: -6px 0 12px;
+  font-size: 11px;
+}
+.focus-goal-manager summary {
+  color: var(--green);
+  cursor: pointer;
+}
+.focus-goal-manager .focus-disclosure {
+  margin: 5px 0;
+}
+.focus-goal-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 4px 0;
+}
+.focus-goal-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.focus-goal-row button {
+  flex: none;
+}
 .focus-size-row {
   display: flex;
   gap: 16px;
@@ -3228,21 +3263,96 @@ main,
 }
 
 .local-audio-library {
-  margin: 8px 16px;
-  padding: 12px;
-  border: 1px solid var(--border, #dce5dc);
-  border-radius: 12px;
+  width: calc(100% - 28px);
+  max-width: 560px;
+  padding: 22px 20px 18px;
 }
-.local-audio-library p {
-  font-size: 13px;
-  line-height: 1.6;
+.local-audio-library h2 {
+  margin: 0 30px 4px 0;
+  font-size: 20px;
+}
+.history-intro {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.history-search-label {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+.history-search-label input {
+  width: 100%;
+  margin-top: 5px;
+}
+#audio-library-list {
+  margin-top: 12px;
+  max-height: min(62dvh, 660px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.audio-library-toolbar,
+.audio-history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+}
+.audio-library-toolbar {
+  margin: 6px 0;
 }
 .local-audio-library section {
   border-top: 1px solid #dce5dc;
-  padding: 12px 0;
+  padding: 7px 0;
 }
 .local-audio-library button {
-  margin: 4px;
+  margin: 2px 0;
+}
+.audio-history-entry h3 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0;
+  font-size: 14px;
+}
+.audio-history-open {
+  display: block;
+  width: 100%;
+  padding: 6px 0 2px;
+  text-align: left;
+  color: var(--ink);
+  font-weight: 650;
+  font-size: 13px;
+}
+.audio-history-open:hover,
+.audio-history-open:focus-visible {
+  color: var(--green);
+  text-decoration: underline;
+}
+.audio-history-entry > details > summary {
+  font-size: 11px;
+  color: var(--green);
+  cursor: pointer;
+}
+.audio-history-status {
+  margin: 3px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.audio-history-actions button {
+  font-size: 12px;
+}
+.audio-history-error {
+  margin-top: 4px;
+  color: #a3462e;
+  font-size: 12px;
+}
+.audio-history-error p {
+  margin: 4px 0 0 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .local-audio-library .history-delete {
   color: #a3462e;
@@ -3258,6 +3368,6 @@ main,
   gap: 6px;
 }
 .local-audio-library details {
-  max-height: 280px;
-  overflow: auto;
+  max-height: 340px;
+  overflow-y: auto;
 }

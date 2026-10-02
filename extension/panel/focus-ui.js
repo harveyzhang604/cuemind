@@ -19,6 +19,30 @@ const labels = {
   technology: '计算机',
   custom: '自定义',
 };
+const goalStoreKey = 'cuemind-focus-goals-v1';
+function savedGoals() {
+  try {
+    const data = JSON.parse(localStorage.getItem(goalStoreKey) || '{}');
+    const strings = (items) =>
+      Array.isArray(items)
+        ? [
+            ...new Set(
+              items
+                .filter((x) => typeof x === 'string')
+                .map((x) => x.trim())
+                .filter(Boolean),
+            ),
+          ]
+        : [];
+    return {
+      profiles: strings(data.profiles),
+      removed: strings(data.removed),
+      hidden: strings(data.hidden).filter((x) => x !== 'off' && x !== 'custom' && labels[x]),
+    };
+  } catch {
+    return { profiles: [], removed: [], hidden: [] };
+  }
+}
 const $ = (s) => document.querySelector(s);
 function node(tag, className, text) {
   const n = document.createElement(tag);
@@ -52,7 +76,81 @@ export function createFocusUI({
     overlayVersion = 0,
     saveRevision = 0,
     pendingOverlayClose = false,
-    analysisRun = null;
+    analysisRun = null,
+    goalStore = savedGoals();
+  function persistGoals() {
+    localStorage.setItem(goalStoreKey, JSON.stringify(goalStore));
+  }
+  function rememberGoal(name) {
+    const value = name.trim();
+    if (!value) return;
+    goalStore.removed = goalStore.removed.filter((x) => x !== value);
+    if (!goalStore.profiles.includes(value)) goalStore.profiles.push(value);
+    persistGoals();
+  }
+  function goalValue() {
+    const index = goalStore.profiles.indexOf(config.customGoal);
+    return config.goal === 'custom' && index >= 0 ? `custom-profile:${index}` : config.goal;
+  }
+  function renderGoalOptions() {
+    const select = $('#focus-goal');
+    select.replaceChildren();
+    for (const [value, label] of Object.entries(labels)) {
+      if (value === 'custom' || goalStore.hidden.includes(value)) continue;
+      select.append(new Option(label, value));
+    }
+    goalStore.profiles.forEach((name, index) =>
+      select.append(new Option(name.replace(/\s+/g, ' '), `custom-profile:${index}`)),
+    );
+    select.append(new Option(labels.custom, 'custom'));
+    select.value = goalValue();
+  }
+  function renderGoalManager() {
+    const list = $('#focus-goal-list');
+    list.replaceChildren();
+    for (const [value, label] of Object.entries(labels)) {
+      if (value === 'off' || value === 'custom') continue;
+      const row = node('div', 'focus-goal-row');
+      row.append(node('span', '', label));
+      const hidden = goalStore.hidden.includes(value);
+      const action = node('button', 'text-btn', hidden ? '恢复' : '移除');
+      action.type = 'button';
+      action.onclick = safe(async () => {
+        goalStore.hidden = hidden
+          ? goalStore.hidden.filter((x) => x !== value)
+          : [...goalStore.hidden, value];
+        persistGoals();
+        if (!hidden && config.goal === value) {
+          $('#focus-goal').value = 'off';
+          await save();
+        }
+        renderGoalOptions();
+        renderGoalManager();
+      });
+      row.append(action);
+      list.append(row);
+    }
+    for (const name of goalStore.profiles) {
+      const row = node('div', 'focus-goal-row');
+      row.append(node('span', '', name.replace(/\s+/g, ' ')));
+      const action = node('button', 'text-btn', '移除');
+      action.type = 'button';
+      action.onclick = safe(async () => {
+        goalStore.profiles = goalStore.profiles.filter((x) => x !== name);
+        goalStore.removed = [...new Set([...goalStore.removed, name])];
+        persistGoals();
+        if (config.goal === 'custom' && config.customGoal === name) {
+          $('#focus-goal').value = 'off';
+          $('#focus-custom').value = '';
+          await save();
+        }
+        renderGoalOptions();
+        renderGoalManager();
+      });
+      row.append(action);
+      list.append(row);
+    }
+  }
   function recordCurrent(id, version) {
     return Boolean(id && id === recordId && version === epoch && getRecord()?.id === id);
   }
@@ -95,9 +193,7 @@ export function createFocusUI({
   dialog.setAttribute('aria-labelledby', 'focus-title');
   dialog.setAttribute('aria-describedby', 'focus-description');
   dialog.innerHTML = `<button type="button" class="close" id="focus-close" aria-label="关闭字幕重点设置">×</button><h2 id="focus-title">字幕重点设置</h2><p id="focus-description" class="focus-description">这里控制字幕重点和字号。各目标的分析分别保存，切回自动恢复。未分析的目标显示普通字号；点击“分析重点词”才会调用模型。自定义术语和字号立即生效。</p>
- <label>重点目标<select id="focus-goal">${Object.entries(labels)
-   .map(([value, label]) => `<option value="${value}">${label}</option>`)
-   .join('')}</select></label>
+ <label>重点目标<select id="focus-goal"></select></label><details class="focus-goal-manager"><summary>管理目标选项</summary><p class="focus-disclosure">选择“自定义”可新增目标；移除只隐藏选项，已完成的分析会保留。</p><div id="focus-goal-list"></div></details>
  <label id="focus-custom-label" hidden>你想重点学习什么？<textarea id="focus-custom" rows="2" maxlength="2000" placeholder="例如：跨境电商中的谈判和物流表达"></textarea></label>
  <div class="focus-size-row"><label>侧栏字号<input id="focus-size" type="range" min="12" max="28" step="1"><output id="focus-size-value"></output></label></div>
  <div class="focus-size-row"><label>视频原文字号<input id="focus-video-size" type="range" min="14" max="48" step="1"><output id="focus-video-size-value"></output></label><label>视频译文字号<input id="focus-video-translation-size" type="range" min="12" max="48" step="1"><output id="focus-video-translation-size-value"></output></label></div>
@@ -120,16 +216,20 @@ export function createFocusUI({
   function message(text) {
     $('#focus-progress').textContent = text;
   }
+  function goalLabel() {
+    return config.goal === 'custom'
+      ? config.customGoal.trim().replace(/\s+/g, ' ') || labels.custom
+      : labels[config.goal];
+  }
   function goalStatus() {
     return config.goal === 'off'
       ? '重点显示已关闭'
       : cache?.done?.length || cache?.marks?.length
-        ? `${labels[config.goal]} · 已保留 ${cache.done.length}/${cache.total} 批分析、${cache.marks.length} 条重点${cache.status === 'complete' ? '，分析完成' : ''}${cache.warnings?.length ? `；${cache.warnings.length} 句标注无效（${cache.warnings[0].error}），显示普通字号` : ''}`
-        : `${labels[config.goal]} · 尚未分析${config.glossary.length ? '，仅显示自定义术语' : ''}`;
+        ? `${goalLabel()} · 已保留 ${cache.done.length}/${cache.total} 批分析、${cache.marks.length} 条重点${cache.status === 'complete' ? '，分析完成' : ''}${cache.warnings?.length ? `；${cache.warnings.length} 句标注无效（${cache.warnings[0].error}），显示普通字号` : ''}`
+        : `${goalLabel()} · 尚未分析${config.glossary.length ? '，仅显示自定义术语' : ''}`;
   }
   function updateControls() {
-    entryValue.textContent =
-      config.goal === 'off' ? '关闭' : labels[config.goal].replace('备考', '');
+    entryValue.textContent = config.goal === 'off' ? '关闭' : goalLabel().replace('备考', '');
     entry.setAttribute(
       'aria-label',
       '重点：' + entryValue.textContent + '。点击设置字幕重点、字号和视频字幕显示',
@@ -156,6 +256,9 @@ export function createFocusUI({
       'focus-save',
     ])
       $('#' + id).disabled = focusBusy;
+    dialog.querySelectorAll('.focus-goal-row button').forEach((button) => {
+      button.disabled = focusBusy;
+    });
     hint.hidden = !focusBusy && !cache?.failed?.length;
     hint.replaceChildren();
     let status = focusBusy
@@ -180,7 +283,8 @@ export function createFocusUI({
     if (!focusBusy) message(goalStatus());
   }
   function fill() {
-    $('#focus-goal').value = config.goal;
+    renderGoalOptions();
+    renderGoalManager();
     $('#focus-custom').value = config.customGoal;
     $('#focus-size').value = config.baseSize;
     $('#focus-video-size').value = config.videoSize;
@@ -192,9 +296,10 @@ export function createFocusUI({
     updateControls();
   }
   function read() {
+    const selectedGoal = $('#focus-goal').value;
     return normalizeFocusConfig({
       ...config,
-      goal: $('#focus-goal').value,
+      goal: selectedGoal.startsWith('custom-profile:') ? 'custom' : selectedGoal,
       customGoal: $('#focus-custom').value,
       baseSize: Number($('#focus-size').value),
       videoSize: Number($('#focus-video-size').value),
@@ -326,6 +431,20 @@ export function createFocusUI({
         : JSON.parse(localStorage.getItem('cuemind-focus-demo') || 'null');
     if (version !== epoch || getRecord()?.id !== record.id) return;
     config = normalizeFocusConfig(data?.config || {});
+    for (const entry of Object.values(data?.focusCaches || record.focusCaches || {})) {
+      if (
+        entry?.goal === 'custom' &&
+        entry.customGoal &&
+        !goalStore.removed.includes(entry.customGoal)
+      )
+        rememberGoal(entry.customGoal);
+    }
+    if (
+      config.goal === 'custom' &&
+      config.customGoal &&
+      !goalStore.removed.includes(config.customGoal)
+    )
+      rememberGoal(config.customGoal);
     cache = normalizeFocusCache(record.sentences, config, data?.cache);
     cacheBook = {
       sentences: record.sentences,
@@ -378,6 +497,9 @@ export function createFocusUI({
       focusCaches: cacheBook?.focusCaches || {},
     };
     ({ config, cache } = selectFocusConfig(cacheBook, next));
+    if (config.goal === 'custom' && config.customGoal) rememberGoal(config.customGoal);
+    renderGoalOptions();
+    renderGoalManager();
     onOverlayPreference?.();
     const savedCache = cache,
       savedCaches = remote ? null : structuredClone(cacheBook.focusCaches);
@@ -529,6 +651,7 @@ export function createFocusUI({
   }
   entry.onclick = safe(async () => {
     if (!getRecord()?.sentences?.length) throw new Error('请先读取视频字幕');
+    goalStore = savedGoals();
     await sync();
     fill();
     message(goalStatus());
@@ -541,8 +664,16 @@ export function createFocusUI({
   });
   $('#focus-analyze').onclick = safe(analyze);
   $('#focus-cancel').onclick = safe(cancel);
+  $('#focus-goal').onchange = safe(async () => {
+    const selected = $('#focus-goal').value;
+    if (selected === 'custom') $('#focus-custom').value = '';
+    else if (selected.startsWith('custom-profile:'))
+      $('#focus-custom').value =
+        goalStore.profiles[Number(selected.slice('custom-profile:'.length))] || '';
+    await save();
+    if (selected === 'custom') $('#focus-custom').focus();
+  });
   for (const id of [
-    'focus-goal',
     'focus-custom',
     'focus-glossary',
     'focus-mastered',
@@ -564,6 +695,12 @@ export function createFocusUI({
     renderText,
     parts,
     sendOverlay,
+    setOverlayLanguage: async (language) => {
+      if (!getRecord()?.sentences?.length || !getTabId()) return;
+      $('#focus-overlay').checked = true;
+      $('#focus-overlay-language').value = language;
+      await save();
+    },
     markMastered,
     refresh,
     get busy() {

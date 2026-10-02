@@ -355,20 +355,26 @@ async function captureFullAudio(record, tabId, controller) {
   if (state.videoKey !== record.videoKey) throw new Error('视频已切换，请重新保存音频。');
   if (!Number.isFinite(state.duration) || state.duration <= 1)
     throw new Error('播放器尚未提供完整视频时长，请开始播放后重试。');
+  const savedRange = audioCoverage(await audioClips(record.videoKey)).ranges.find(
+    (range) => range.start <= 0.5,
+  );
+  // Rewind slightly into the last saved clip so the next recording overlaps it.
+  // Otherwise an interrupted long video restarts from zero on every retry.
+  const resumeAt = Math.max(0, Math.min(state.duration - 2, (savedRange?.end || 0) - 2));
   await player(tabId, { action: 'pause', videoKey: record.videoKey });
-  await player(tabId, { action: 'seek', time: 0, videoKey: record.videoKey });
+  await player(tabId, { action: 'seek', time: resumeAt, videoKey: record.videoKey });
   const readyDeadline = Date.now() + 20000;
   let ready = false;
   while (Date.now() < readyDeadline) {
     if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
     const current = await player(tabId, { action: 'state', videoKey: record.videoKey });
-    if (!current.seeking && current.readyState >= 2 && current.time < 1.5) {
+    if (!current.seeking && current.readyState >= 2 && Math.abs(current.time - resumeAt) < 1.5) {
       ready = true;
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  if (!ready) throw new Error('视频跳到开头后没有准备好音频，请恢复播放后重试。');
+  if (!ready) throw new Error('视频跳到待保存位置后没有准备好音频，请恢复播放后重试。');
   if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
   let started;
   try {
@@ -523,11 +529,7 @@ function asrSentences(record, segment) {
   );
 }
 function reconcileAsrTranslationStatuses(record) {
-  if (
-    record.videoInfo?.platform !== 'migu' ||
-    !record.transcriptMeta?.source?.startsWith('whisper')
-  )
-    return false;
+  if (!record.transcriptMeta?.asrSegments?.length) return false;
   let changed = false;
   for (const segment of record.transcriptMeta.asrSegments || []) {
     if (!['source-ready', 'translation-failed'].includes(segment.status)) continue;
@@ -1163,11 +1165,7 @@ async function route(m) {
       const result = await runTask(record, m.capability, config, m.args || {}, signal, store, (p) =>
         notify({ event: 'progress', recordId: record.id, ...p }),
       );
-      if (
-        m.capability === 'translation' &&
-        record.videoInfo.platform === 'migu' &&
-        record.transcriptMeta.source?.startsWith('whisper')
-      ) {
+      if (m.capability === 'translation') {
         if (reconcileAsrTranslationStatuses(record)) await store(record);
       }
       if (signal.aborted) throw new DOMException('已取消', 'AbortError');
@@ -1409,7 +1407,11 @@ async function route(m) {
       throw new Error('这条视频正在处理，请等待完成或先取消任务。');
     await db.deleteVideoHistory(key);
     audioDownloads.delete(key);
-    await chrome.storage.local.remove(`lastRecord:${key}`);
+    await Promise.all(
+      [`lastRecord:${key}`, `reading:${key}`, `watch:${key}`].map((name) =>
+        chrome.storage.local.remove(name),
+      ),
+    );
     notify({ event: 'history-deleted', videoKey: key });
     return true;
   }
@@ -1452,12 +1454,50 @@ async function route(m) {
       record.sentences = localSentences(record.rawCaptions);
       record.paragraphs = paragraphs(record.sentences);
       recoverEquivalentLearning(record, [previous]);
-      const segment = record.transcriptMeta.asrSegments?.find((s) => s.id === clip.segmentId);
-      if (segment) {
-        segment.status = asrSentences(record, segment).length ? 'source-ready' : 'no-speech';
-        delete segment.error;
+      record.transcriptMeta.asrSegments ||= [];
+      let segment = record.transcriptMeta.asrSegments.find((s) => s.id === clip.segmentId);
+      if (!segment) {
+        segment = {
+          id: clip.segmentId || `saved-${clip.id}`,
+          start: clip.start,
+          end: clip.end,
+          status: 'pending',
+        };
+        record.transcriptMeta.asrSegments.push(segment);
       }
+      segment.status = segments.length ? 'source-ready' : 'no-speech';
+      delete segment.error;
       await store(record);
+      const missing = asrSentences(record, segment).filter((sentence) => !sentence.translation);
+      const textConfig = await settings();
+      if (segments.length && missing.length && modelConfigured(textConfig)) {
+        try {
+          const errors = [];
+          for (let i = 0; i < missing.length; i += 70) {
+            const result = await runTask(
+              record,
+              'translation',
+              textConfig,
+              { selectedIds: missing.slice(i, i + 70).map((sentence) => sentence.id) },
+              signal,
+              store,
+              (progress) => notify({ event: 'progress', recordId: record.id, ...progress }),
+            );
+            errors.push(...(result.errors || []));
+          }
+          if (asrSentences(record, segment).every((sentence) => sentence.translation))
+            segment.status = 'done';
+          else {
+            segment.status = 'translation-failed';
+            segment.error = errors[0]?.error || '译文未完成，可重试';
+          }
+        } catch (error) {
+          if (signal.aborted) throw error;
+          segment.status = 'translation-failed';
+          segment.error = error.message.slice(0, 240);
+        }
+        await store(record);
+      }
       return record;
     });
   if (m.type === 'ASR_FILE')
@@ -1915,7 +1955,8 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
           discard: true,
           reason: `${interruption}，已结束本次录音；此前完成的字幕已保留。`,
         });
-      else if (m.paused) stopCapture();
+      else if (m.paused)
+        stopCapture(s.audioOnly ? { reason: '视频播放已暂停，完整音频尚未保存完毕。' } : {});
     }
     return;
   }

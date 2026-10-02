@@ -11,6 +11,29 @@
       <header class="video-head compact-video">
         <div class="video-title-row">
           <h1 id="video-title">打开视频，开始学习</h1>
+          <button
+            id="open-history"
+            class="icon-btn"
+            type="button"
+            title="学习历史"
+            aria-label="打开学习历史"
+            aria-haspopup="dialog"
+            aria-controls="local-audio-library"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+              <path d="M3 4v5h5" />
+              <path d="M12 7v5l3.5 2" />
+            </svg>
+          </button>
           <button id="settings" class="icon-btn" title="模型与偏好设置" aria-label="设置">
             ⚙
           </button>
@@ -18,17 +41,20 @@
         <div class="meta"><span id="video-meta"></span></div>
         <span id="platform" hidden></span>
       </header>
-      <details id="local-audio-library" class="local-audio-library">
-        <summary>学习历史 · 视频链接与本地音频</summary>
-        <p>
-          读取过的视频可从这里重新打开。每条记录可保存完整音频或删除。YouTube 和
-          B站优先在后台单独保存音轨；如果音轨不可下载，点击保存后会从开头自动播放并采集。咪咕使用播放采集，耗时约等于视频长度。字幕备份不包含音频，请单独导出。
-        </p>
-        <button id="audio-save-current">保存当前播放音频（不重新识别）</button>
-        <button id="audio-library-refresh">刷新学习历史</button>
-        <button id="audio-video-mode" hidden>返回在线视频</button>
+      <dialog id="local-audio-library" class="local-audio-library" aria-labelledby="history-title">
+        <button id="close-history" class="close" type="button" aria-label="关闭学习历史">×</button>
+        <h2 id="history-title">学习历史</h2>
+        <p class="history-intro">选择视频继续学习；字幕、问答、概览和笔记会随记录恢复。</p>
+        <label class="history-search-label"
+          >搜索视频<input id="history-search" type="search" placeholder="搜索标题或平台"
+        /></label>
+        <div class="audio-library-toolbar">
+          <button id="audio-save-current">保存当前视频音频</button>
+          <button id="audio-library-refresh">刷新</button>
+          <button id="audio-video-mode" hidden>打开在线视频</button>
+        </div>
         <div id="audio-library-list"></div>
-      </details>
+      </dialog>
       <nav class="tabs" aria-label="学习功能">
         <button class="active" data-tab="transcript">字幕</button
         ><button data-tab="study">问答</button><button data-tab="overview">概览</button

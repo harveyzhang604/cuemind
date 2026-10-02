@@ -141,6 +141,15 @@ export function buildAsrTimeline(duration, savedSegments = [], currentSessionId 
   return timeline;
 }
 
+// Fractional capture boundaries can leave a sub-second gap that formats as
+// "01:24–01:24". It cannot be retried by the two-second minimum recorder plan.
+export function visibleAsrTimeline(timeline) {
+  return timeline.filter(
+    (segment) =>
+      segment.status !== 'pending' || Math.floor(segment.start) !== Math.floor(segment.end),
+  );
+}
+
 const hasOriginal = (segment) =>
   ['source-ready', 'translating', 'done', 'translation-failed', 'no-speech'].includes(
     segment?.status,

@@ -16,7 +16,7 @@ import { markdown, mindmap, outline, subtitles } from '../core/export.js';
 import { demoRecord } from './demo.js';
 import { prepareSpeechAudio, speechSettings } from '../services/speech.js';
 import { keyFromUrl, matchesVideoUrl } from '../core/video.js';
-import { buildAsrTimeline } from '../core/asr-progress.js';
+import { buildAsrTimeline, visibleAsrTimeline } from '../core/asr-progress.js';
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const ext = !!globalThis.chrome?.runtime?.id;
@@ -68,6 +68,8 @@ let availableTracks = [],
   captureInfo = null,
   asrElapsedTimer = null;
 let localAudioMode = false;
+let lastWatchSaveAt = 0;
+let pendingHistoryResume = null;
 const localPlayer = new LocalAudioPlayer((state) => {
   if (localAudioMode && record) receivePlayerState({ ...state, tabId, localAudio: true });
 }, error);
@@ -321,6 +323,7 @@ async function leaveVideo() {
   }
 }
 async function load(refresh = false, trackId) {
+  saveWatchPosition();
   saveReading();
   automaticTranslationRecordId = null;
   asrOpen = false;
@@ -396,6 +399,20 @@ async function load(refresh = false, trackId) {
     if (['youtube', 'bilibili'].includes(record.videoInfo.platform))
       rpc('SAVE_VIDEO_AUDIO', { recordId: record.id, tabId: tab.id }).catch(() => {});
     await bindPlayer();
+    if (
+      gen === generation &&
+      pendingHistoryResume?.videoKey === record?.videoKey &&
+      Date.now() - pendingHistoryResume.createdAt < 30000
+    ) {
+      const resumeAt = pendingHistoryResume.time;
+      pendingHistoryResume = null;
+      if (resumeAt > 1) await seekPlay(resumeAt);
+      else
+        await rpc('PLAYER_COMMAND', {
+          tabId,
+          command: { action: 'play', videoKey: record.videoKey },
+        });
+    }
     if (data.recovered?.translations || data.recovered?.focus)
       toast(
         `已复用同视频缓存：${data.recovered.translations || 0} 句译文、${data.recovered.focus || 0} 组重点词`,
@@ -730,7 +747,14 @@ function locate({ paged = false } = {}) {
     mode === 'raw'
       ? record.rawCaptions.findIndex((r) => r.id === current().sourceIds[0])
       : record.sentences.indexOf(current());
-  if (i < listOffset || i >= listOffset + limit) {
+  // Bring the next group into the DOM before the current cue reaches the
+  // bottom of the rendered window, so following never runs out of rows.
+  const total = mode === 'raw' ? record.rawCaptions.length : record.sentences.length;
+  if (
+    i < listOffset ||
+    i >= listOffset + limit ||
+    (listOffset + limit < total && i >= listOffset + limit - 12)
+  ) {
     listOffset = Math.max(0, i - 15);
     limit = 70;
     renderSentences();
@@ -756,7 +780,7 @@ function locate({ paged = false } = {}) {
       // Keep the page still while the spoken sentence remains readable. Advance
       // a page near the footer, or return to the top when a replay loops back.
       const inset = 12,
-        clearance = Math.min(24, Math.max(8, (bottom - top) / 10));
+        clearance = Math.max(48, (bottom - top) * 0.3);
       const bounds = replaySelection && replayBounds(),
         rows = $$('#sentences .sentence');
       const first =
@@ -921,6 +945,7 @@ function receivePlayerState(m) {
 
   $('#stop').hidden = !m.session && !smart;
   time = m.time;
+  if (Date.now() - lastWatchSaveAt >= 5000 || m.playbackEvent === 'pause') saveWatchPosition();
   updateCaptureEndState(m.duration);
   maybeTranslateVideo();
   const marker = $('.timeline-marker');
@@ -2041,13 +2066,14 @@ function syncModeControls() {
   $('#transcript-mode').value = mode;
   $$('[data-note-mode]').forEach((b) => b.classList.toggle('active', b.dataset.noteMode === mode));
 }
-function changeMode(value) {
+function changeMode(value, syncOverlay = false) {
   mode = value;
   syncModeControls();
   renderSentences();
   renderNotes();
   saveReading();
   maybeTranslateVideo();
+  if (syncOverlay && ext && tabId) focus.setOverlayLanguage(value).catch(error);
 }
 $('#demo').onclick = guard(async () => {
   const gen = ++generation;
@@ -2079,7 +2105,7 @@ $('#demo').onclick = guard(async () => {
   syncModeControls();
   status('正在体验原创示例，未连接视频播放器，也不会发送 AI 请求。');
 });
-$('#transcript-mode').onchange = (e) => changeMode(e.currentTarget.value);
+$('#transcript-mode').onchange = (e) => changeMode(e.currentTarget.value, true);
 $$('[data-note-mode]').forEach((b) => (b.onclick = () => changeMode(b.dataset.noteMode)));
 $('#search').oninput = () => {
   listOffset = 0;
@@ -2665,7 +2691,7 @@ function renderAsrSegments() {
   const duration =
     Number(record?.videoInfo?.duration) ||
     all.reduce((latest, segment) => Math.max(latest, Number(segment.end) || 0), 0);
-  const timeline = buildAsrTimeline(duration, all, sessionId);
+  const timeline = visibleAsrTimeline(buildAsrTimeline(duration, all, sessionId));
   const segments = sessionId ? all.filter((segment) => segment.sessionId === sessionId) : all;
   const originalReady = timeline.filter((segment) =>
     ['source-ready', 'translating', 'done', 'translation-failed'].includes(segment.status),
@@ -2817,6 +2843,7 @@ function renderCapture() {
   bar.append(button('取消剩余转写', () => rpc('CAPTURE_STOP', { cancel: true })));
 }
 
+let browseResumeTimer;
 function pauseFollow(event) {
   locateRevision++;
   if (
@@ -2828,8 +2855,23 @@ function pauseFollow(event) {
   followPlayback = false;
   $('#transcript').dataset.followPlayback = 'false';
   updateLocateControl();
+  if (event && ['wheel', 'touchmove', 'keydown', 'pointerdown'].includes(event.type)) {
+    clearTimeout(browseResumeTimer);
+    browseResumeTimer = setTimeout(() => {
+      if (
+        !followPlayback &&
+        lastContentPaused === false &&
+        active >= 0 &&
+        !getSelection()?.toString()
+      ) {
+        resumeFollow();
+        locate({ paged: true });
+      }
+    }, 6000);
+  }
 }
 function resumeFollow() {
+  clearTimeout(browseResumeTimer);
   replayViewAnchor = null;
   followPlayback = true;
   $('#transcript').dataset.followPlayback = 'true';
@@ -2849,6 +2891,7 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('pagehide', () => {
+  saveWatchPosition();
   saveReading();
   clearTimeout(panelArrow?.timer);
   if (ext && (tabId || localAudioMode) && record && record.videoInfo.platform !== 'demo')
@@ -2916,15 +2959,30 @@ document.addEventListener('keydown', (e) => {
 });
 if (ext) {
   chrome.tabs.onActivated.addListener(async (info) => {
-    if (localAudioMode) return;
     try {
       const tab = await chrome.tabs.get(info.tabId);
       if (tab.url?.startsWith(chrome.runtime.getURL(''))) return;
+      if (!keyFromUrl(tab.url)) return;
       await load();
     } catch {}
   });
   chrome.tabs.onUpdated?.addListener((id, change) => {
-    if (localAudioMode) return;
+    if (pendingHistoryResume && change.status === 'complete') {
+      chrome.tabs
+        .get(id)
+        .then((tab) => {
+          if (tab.active && keyFromUrl(tab.url) === pendingHistoryResume?.videoKey)
+            load().catch(error);
+        })
+        .catch(() => {});
+    }
+    if (localAudioMode) {
+      if (change.url && keyFromUrl(change.url))
+        chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+          if (tab?.id === id) load().catch(error);
+        });
+      return;
+    }
     if (id !== tabId || !change.url) return;
     const nextKey = keyFromUrl(change.url);
     if (nextKey && !matchesVideoUrl(record?.videoKey || loadingVideoKey, change.url))
@@ -4055,6 +4113,13 @@ function saveReading() {
   };
   chrome.storage.local.set({ ['reading:' + id]: state }).catch(() => {});
 }
+function saveWatchPosition() {
+  if (!ext || !record || record.videoInfo.platform === 'demo' || !Number.isFinite(time)) return;
+  lastWatchSaveAt = Date.now();
+  chrome.storage.local
+    .set({ ['watch:' + record.videoKey]: { time: Math.max(0, time), updatedAt: lastWatchSaveAt } })
+    .catch(() => {});
+}
 async function restoreReading(gen) {
   if (!ext || !chrome.storage?.local?.get || !record) return;
   const id = record.id,
@@ -4157,30 +4222,57 @@ async function refreshAudioLibrary() {
   const list = $('#audio-library-list');
   list.textContent = '正在读取本地音频…';
   const entries = await rpc('AUDIO_LIBRARY');
+  const positions = await chrome.storage.local.get(
+    entries.map((entry) => 'watch:' + entry.videoKey),
+  );
   list.replaceChildren();
-  if (!entries.length) {
-    list.textContent = '尚无学习记录。读取视频后，这里会保存视频链接与可用的本地音频。';
+  const query = $('#history-search').value.trim().toLowerCase();
+  const visible = entries
+    .filter((entry) => !query || `${entry.title} ${entry.platform}`.toLowerCase().includes(query))
+    .sort(
+      (a, b) =>
+        Math.max(positions['watch:' + b.videoKey]?.updatedAt || 0, b.updatedAt || 0) -
+        Math.max(positions['watch:' + a.videoKey]?.updatedAt || 0, a.updatedAt || 0),
+    );
+  if (!visible.length) {
+    list.textContent = entries.length
+      ? '没有找到匹配的视频。'
+      : '尚无学习记录。读取视频后，这里会保存视频链接与可用的本地音频。';
     return;
   }
-  for (const entry of entries) {
+  for (const entry of visible) {
     const box = document.createElement('section'),
-      title = document.createElement('h3');
-    title.textContent = entry.title;
+      resumeAt = Math.max(0, Number(positions['watch:' + entry.videoKey]?.time) || 0),
+      title = button(
+        entry.title,
+        () => continueHistory(entry, resumeAt),
+        'text-btn audio-history-open',
+      );
+    box.className = 'audio-history-entry';
+    title.title = entry.title;
+    title.disabled = !entry.url && !entry.clips.length;
     const info = document.createElement('p'),
       summary = audioCoverage(entry.clips);
     const complete =
       entry.duration > 0 &&
       summary.ranges.some((range) => range.start <= 0.5 && range.end >= entry.duration - 1);
-    info.textContent = entry.clips.length
-      ? `已保存 ${formatTime(summary.seconds)} / ${formatTime(entry.duration || summary.seconds)} · ${(summary.bytes / 1048576).toFixed(1)} MB · ${entry.clips.length} 段`
-      : '音频尚未保存';
+    const platform =
+      { youtube: 'YouTube', bilibili: 'B站', migu: '咪咕视频' }[entry.platform] || entry.platform;
+    info.textContent = `${platform} · ${formatTime(resumeAt)} / ${formatTime(entry.duration || 0)} · ${entry.clips.length ? `音频 ${formatTime(summary.seconds)} 已保存` : '音频未保存'}`;
+    info.className = 'audio-history-status';
     box.append(title, info);
+    const management = document.createElement('details'),
+      managementTitle = document.createElement('summary');
+    managementTitle.textContent = '音频、链接与记录管理';
+    management.append(managementTitle);
+    const actions = document.createElement('div');
+    actions.className = 'audio-history-actions';
     if (entry.url)
-      box.append(
-        button('打开视频链接', () => chrome.tabs.create({ url: entry.url })),
-        button('复制视频链接', () => copy(entry.url)),
+      actions.append(
+        button('打开视频', () => chrome.tabs.create({ url: entry.url })),
+        button('复制链接', () => copy(entry.url)),
       );
-    if (entry.clips.length) box.append(button('打开本地学习', () => openLocalAudio(entry)));
+    if (entry.clips.length) actions.append(button('听本地音频', () => openLocalAudio(entry)));
     const save = button(complete ? '音频已完整保存' : '保存完整音频', async () => {
       await rpc('SAVE_VIDEO_AUDIO', {
         recordId: entry.recordId,
@@ -4194,8 +4286,9 @@ async function refreshAudioLibrary() {
       entry.platform === 'migu'
         ? '咪咕会从视频开头自动播放并实时采集完整音频，耗时约等于视频长度。'
         : '优先在后台下载独立音轨；不可下载时从开头自动播放并采集。';
-    box.append(save);
-    box.append(
+    save.textContent = complete ? '音频已保存' : '保存音频';
+    actions.append(save);
+    actions.append(
       button(
         '删除记录',
         async () => {
@@ -4226,15 +4319,16 @@ async function refreshAudioLibrary() {
         'text-btn history-delete',
       ),
     );
+    management.append(actions);
     if (entry.audioStatus?.state === 'saving') {
-      box.append(
+      management.append(
         el(
           'p',
           'hint',
           `${entry.audioStatus.method === 'playback' ? '正在实时播放并采集' : '正在后台下载'}音频 · ${entry.audioStatus.seconds != null ? `${formatTime(entry.audioStatus.seconds)} / ${formatTime(entry.audioStatus.totalSeconds || entry.duration)} · ` : ''}${(entry.audioStatus.bytes / 1048576).toFixed(1)} MB${entry.audioStatus.total ? ` / ${(entry.audioStatus.total / 1048576).toFixed(1)} MB` : ''}`,
         ),
       );
-      box.append(
+      management.append(
         button('取消保存', async () => {
           await rpc('CANCEL', {
             recordId: `audio:${entry.videoKey}`,
@@ -4244,9 +4338,16 @@ async function refreshAudioLibrary() {
         }),
       );
     }
-    if (['failed', 'unavailable'].includes(entry.audioStatus?.state))
-      box.append(el('p', 'hint', `后台保存未完成：${entry.audioStatus.error}`));
+    if (['failed', 'unavailable'].includes(entry.audioStatus?.state)) {
+      const failure = document.createElement('details');
+      failure.className = 'audio-history-error';
+      const heading = document.createElement('summary');
+      heading.textContent = '上次保存未完成 · 查看原因';
+      failure.append(heading, el('p', 'hint', entry.audioStatus.error || '保存失败，可重试'));
+      management.append(failure);
+    }
     if (!entry.clips.length) {
+      box.append(management);
       list.append(box);
       continue;
     }
@@ -4299,24 +4400,27 @@ async function refreshAudioLibrary() {
                   if (gen !== generation) return;
                   record = updated;
                   render();
-                  status('原文已保存');
+                  const segment = record.transcriptMeta?.asrSegments?.find(
+                    (row) => row.id === clip.segmentId,
+                  );
+                  status(
+                    segment?.status === 'translation-failed'
+                      ? `原文已保存，译文未完成：${segment.error || '可重试'}`
+                      : segment?.status === 'source-ready'
+                        ? '原文已保存；配置文本模型后可补齐译文。'
+                        : '音频识别与译文已保存',
+                    segment?.status === 'translation-failed',
+                  );
                 } finally {
                   busy = false;
                 }
-                if (gen === generation && modelReady()) {
-                  const ids = record.sentences
-                    .filter((s) => s.start < clip.end && s.end > clip.start && !s.translation)
-                    .map((s) => s.id);
-                  for (let i = 0; i < ids.length; i += 70)
-                    await task('translation', { selectedIds: ids.slice(i, i + 70) });
-                } else if (gen === generation) status('原文已保存；配置文本模型后可补齐译文。');
               }),
             ]
           : []),
       );
       details.append(row);
     }
-    box.append(
+    management.append(
       details,
       button('删除此视频本地音频', async () => {
         if (recording) throw new Error('请先结束音频采集');
@@ -4330,11 +4434,49 @@ async function refreshAudioLibrary() {
         await refreshAudioLibrary();
       }),
     );
+    box.append(management);
     list.append(box);
+  }
+}
+async function continueHistory(entry, savedTime) {
+  if (busy || backgroundBusy || recording) throw new Error('请先结束当前任务再切换学习视频');
+  const resumeAt =
+    entry.duration > 0 && savedTime >= entry.duration - 3 ? 0 : Math.max(0, savedTime);
+  $('#local-audio-library').close();
+  if (entry.videoKey === record?.videoKey && !localAudioMode && tabId) {
+    await rpc('PLAYER_COMMAND', {
+      tabId,
+      command: { action: 'play', videoKey: record.videoKey },
+    });
+    return;
+  }
+  if (!entry.url) {
+    await openLocalAudio(entry);
+    if (resumeAt > 1) await seekPlay(resumeAt);
+    return;
+  }
+  pendingHistoryResume = { videoKey: entry.videoKey, time: resumeAt, createdAt: Date.now() };
+  const tabs = await chrome.tabs.query({});
+  const existing = tabs.find((tab) => keyFromUrl(tab.url) === entry.videoKey);
+  if (existing) {
+    await chrome.tabs.update(existing.id, { active: true });
+    if (existing.windowId) await chrome.windows.update(existing.windowId, { focused: true });
+    if (existing.active) await load();
+  } else {
+    await chrome.tabs.create({ url: timestampUrl({ url: entry.url }, resumeAt) || entry.url });
   }
 }
 async function openLocalAudio(entry) {
   if (busy || backgroundBusy || recording) throw new Error('请先结束当前任务再切换到本地学习');
+  saveWatchPosition();
+  saveReading();
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (entry.videoKey === keyFromUrl(activeTab?.url)) {
+    if (localAudioMode || record?.videoKey !== entry.videoKey || tabId !== activeTab.id)
+      await load();
+    status('当前视频已打开，字幕会跟随视频播放。');
+    return;
+  }
   await leaveVideo();
   const next = await rpc('GET_RECORD', { recordId: entry.recordId });
   const clips = await audioClips(next.videoKey);
@@ -4360,10 +4502,21 @@ async function openLocalAudio(entry) {
   status('本地音频学习 · 无需打开原视频。识别和补译仍需联网。');
 }
 $('#audio-library-refresh').onclick = guard(refreshAudioLibrary);
-$('#local-audio-library').addEventListener('toggle', () => {
-  if ($('#local-audio-library').open) refreshAudioLibrary().catch(error);
+$('#open-history').onclick = guard(async () => {
+  $('#local-audio-library').showModal();
+  await refreshAudioLibrary();
 });
-$('#audio-video-mode').onclick = guard(() => load());
+$('#close-history').onclick = () => $('#local-audio-library').close();
+$('#history-search').addEventListener('input', () => refreshAudioLibrary().catch(error));
+$('#audio-video-mode').onclick = guard(async () => {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (record?.videoKey === keyFromUrl(activeTab?.url)) return load();
+  if (record?.videoInfo?.url && matchesVideoUrl(record.videoKey, record.videoInfo.url)) {
+    await chrome.tabs.create({ url: record.videoInfo.url });
+    return;
+  }
+  throw new Error('这条学习记录没有可打开的视频链接');
+});
 window.addEventListener('pagehide', () => localPlayer.dispose());
 
 $('#audio-save-current').onclick = guard(() => startCapture(undefined, true));

@@ -6,7 +6,21 @@ import {
   captureClockProblem,
   planAsrSegments,
   skipRecognizedAudio,
+  visibleAsrTimeline,
 } from '../extension/core/asr-progress.js';
+
+test('progress hides a sub-second pending boundary that renders as the same timestamp', () => {
+  const timeline = buildAsrTimeline(100, [
+    { id: 'first', start: 0, end: 84.2, status: 'done' },
+    { id: 'second', start: 84.7, end: 100, status: 'done' },
+  ]);
+  assert.ok(timeline.some((segment) => segment.status === 'pending' && segment.start === 84.2));
+  assert.ok(
+    !visibleAsrTimeline(timeline).some(
+      (segment) => segment.status === 'pending' && segment.start === 84.2,
+    ),
+  );
+});
 
 test('ASR progress covers the whole video and retains earlier session results', () => {
   const timeline = buildAsrTimeline(

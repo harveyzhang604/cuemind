@@ -23,7 +23,7 @@ async function fixture(existingStorage){
  const audioClips=async key=>[...stores.audio.values()].filter(clip=>!key||clip.videoKey===key).map(({blob,...clip})=>clip);
  const audioCoverage=clips=>({ranges:clips.map(clip=>({start:clip.start,end:clip.end}))});
  const saveAudio=async clip=>{stores.audio.set(clip.videoKey+':'+clip.segmentId,{...clip,id:clip.videoKey+':'+clip.segmentId,bytes:clip.blob.size});};
- const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,ReadableStream,Blob,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,mismatchedOriginalTrack,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,audioClips,audioCoverage,saveAudio,inspectAudioSource:()=>{},
+ const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,ReadableStream,Blob,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,mismatchedOriginalTrack,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,audioClips,audioCoverage,saveAudio,getAudio:async id=>stores.audio.get(id),fetch,inspectAudioSource:()=>{},
  db:{get:async(name,id)=>structuredClone(stores[name].get(id)),all:async name=>structuredClone([...stores[name].values()]),put:async(name,value)=>{stores[name].set(value.id,structuredClone(value));return value;},remove:async(name,id)=>stores[name].delete(id),deleteVideoHistory:async key=>{const ids=[...stores.videos.values()].filter(v=>v.videoKey===key).map(v=>v.id);for(const [name,store] of Object.entries(stores)){if(name==='aiCache'){store.clear();continue;}for(const [id,value] of store)if(value.videoKey===key||ids.includes(value.recordId))store.delete(id);}return ids;},updateNote:async(id,expected,change)=>{const n=stores.notes.get(id);if(n?.updatedAt!==expected)return null;const next={...n,...change};stores.notes.set(id,structuredClone(next));return next;},manage:async(action,transform)=>{if(action==='reset'){Object.values(stores).forEach(s=>s.clear());}else if(action==='delete-notes')stores.notes.clear();else{stores.chats.clear();for(const [id,r]of stores.videos)stores.videos.set(id,transform(r));}}},
  chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),remove:async k=>{delete storage[k];},clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},scripting:{executeScript:async()=>[{result:[]}]},tabs:{get:async()=>({id:1,url:inspection.info.url,status:'complete'}),query:async()=>[{id:1,url:inspection.info.url,status:'complete'}],create:async({url})=>({id:2,url,status:'complete'}),update:async()=>{},remove:async()=>{},sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
  context.cachedCompletion=(...args)=>context.completion(...args.slice(0,5));
@@ -85,11 +85,15 @@ test('deleting a history item removes every revision and related learning data',
  f.stores.chats.set('chat',{id:'chat',recordId:copy.id});
  f.stores.audio.set('audio',{id:'audio',recordId:record.id,videoKey:record.videoKey,bytes:10,start:0,end:2});
  f.stores.aiCache.set('shared',{id:'shared',value:'cached result'});
+ f.storage['watch:'+record.videoKey]={time:42};
+ f.storage['reading:'+record.videoKey]={scrollY:100};
  assert.equal((await f.route({type:'AUDIO_LIBRARY'})).length,1);
  assert.equal(await f.route({type:'DELETE_VIDEO_HISTORY',videoKey:record.videoKey}),true);
  assert.equal((await f.route({type:'AUDIO_LIBRARY'})).length,0);
  for(const store of Object.values(f.stores))assert.equal(store.size,0);
  assert.equal(f.storage['lastRecord:'+record.videoKey],undefined);
+ assert.equal(f.storage['watch:'+record.videoKey],undefined);
+ assert.equal(f.storage['reading:'+record.videoKey],undefined);
 });
 test('Migu full-audio capture starts at zero and never writes fake ASR results',async()=>{
  const f=await fixture();
@@ -480,4 +484,113 @@ test('rolling ASR saves each source segment, translates it, and keeps earlier bi
  assert.equal(finished.transcriptMeta.asrSegments.find(s=>s.id===third.id).status,'failed');
  assert.equal(finished.transcriptMeta.asrSegments[4].status,'pending');
  assert.equal(finished.transcriptMeta.partial,true);
+});
+test('retrying interrupted full-audio capture resumes from saved coverage with overlap', async () => {
+  const f = await fixture();
+  f.context.fetchSupadata = async () => ({ raw: [], language: 'en' });
+  const { record } = await f.route({ type: 'LOAD', tabId: 1 });
+  await f.context.saveAudio({
+    videoKey: record.videoKey,
+    recordId: record.id,
+    segmentId: 'previous',
+    start: 0,
+    end: 12,
+    blob: new Blob([new Uint8Array(1500)], { type: 'audio/webm' }),
+  });
+  const mediaUrl = 'https://rr1.googlevideo.com/videoplayback?id=fixture';
+  f.context.chrome.scripting.executeScript = async () => [
+    { result: [{ url: mediaUrl, mimeType: 'audio/mp4', bytes: 4 }] },
+  ];
+  f.context.fetch = async () => ({ ok: false, status: 403, url: mediaUrl });
+  const commands = [];
+  let time = 0;
+  f.context.chrome.tabs.sendMessage = async (_id, m) => {
+    commands.push(m);
+    if (m.action === 'seek') time = m.time;
+    return {
+      ok: true,
+      data: {
+        time,
+        duration: 30,
+        paused: false,
+        rate: 1,
+        readyState: 4,
+        seeking: false,
+        isAd: false,
+        videoKey: record.videoKey,
+      },
+    };
+  };
+  f.context.chrome.offscreen = { hasDocument: async () => true };
+  f.context.chrome.tabCapture = { getMediaStreamId: async () => 'stream' };
+  f.context.chrome.runtime.sendMessage = async () => ({ ok: true });
+  assert.equal(
+    (await f.route({ type: 'SAVE_VIDEO_AUDIO', recordId: record.id, tabId: 1, retry: true })).state,
+    'saving',
+  );
+  for (let i = 0; i < 40 && !commands.some((x) => x.action === 'play'); i++)
+    await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(commands.find((x) => x.action === 'seek')?.time, 10);
+  assert.ok(commands.some((x) => x.action === 'play'));
+});
+test('recognizing saved audio fills a missing ASR progress segment', async () => {
+  const f = await fixture();
+  f.context.fetchSupadata = async () => ({ raw: [], language: 'en' });
+  const { record } = await f.route({ type: 'LOAD', tabId: 1 });
+  await f.context.saveAudio({
+    videoKey: record.videoKey,
+    recordId: record.id,
+    segmentId: 'saved-gap',
+    start: 10,
+    end: 20,
+    blob: new Blob([new Uint8Array(100)], { type: 'audio/webm' }),
+  });
+  const clipId = `${record.videoKey}:saved-gap`;
+  f.context.cachedTranscribe = async () => [{ start: 1, end: 3, text: 'Recognized words.' }];
+  const updated = await f.route({
+    type: 'RETRY_SAVED_AUDIO',
+    recordId: record.id,
+    clipId,
+    dataUrl: 'data:audio/webm;base64,AA==',
+  });
+  assert.ok(updated.sentences.some((sentence) => sentence.rawText === 'Recognized words.'));
+  assert.ok(
+    updated.transcriptMeta.asrSegments.some(
+      (segment) => segment.id === 'saved-gap' && segment.status === 'source-ready',
+    ),
+  );
+});
+test('saved-audio retry completes translation in the background before reporting success', async () => {
+  const f = await fixture();
+  f.storage.settings.apiKey = 'fixture';
+  f.context.fetchSupadata = async () => ({ raw: [], language: 'en' });
+  const { record } = await f.route({ type: 'LOAD', tabId: 1 });
+  await f.context.saveAudio({
+    videoKey: record.videoKey,
+    recordId: record.id,
+    segmentId: 'translated-gap',
+    start: 10,
+    end: 20,
+    blob: new Blob([new Uint8Array(100)], { type: 'audio/webm' }),
+  });
+  f.context.cachedTranscribe = async () => [{ start: 1, end: 3, text: 'Recognized words.' }];
+  f.context.runTask = async (updated, capability, _settings, args, _signal, store) => {
+    assert.equal(capability, 'translation');
+    for (const sentence of updated.sentences)
+      if (args.selectedIds.includes(sentence.id)) sentence.translation = '已识别。';
+    await store(updated);
+    return { errors: [] };
+  };
+  const updated = await f.route({
+    type: 'RETRY_SAVED_AUDIO',
+    recordId: record.id,
+    clipId: `${record.videoKey}:translated-gap`,
+    dataUrl: 'data:audio/webm;base64,AA==',
+  });
+  assert.ok(updated.sentences.some((sentence) => sentence.translation === '已识别。'));
+  assert.ok(
+    updated.transcriptMeta.asrSegments.some(
+      (segment) => segment.id === 'translated-gap' && segment.status === 'done',
+    ),
+  );
 });
