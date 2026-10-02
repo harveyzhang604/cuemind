@@ -193,7 +193,19 @@
     }
     if (m.action === 'play') {
       stop();
-      await v.play();
+      try {
+        await v.play();
+      } catch (error) {
+        if (!m.captureControl || error?.name !== 'NotAllowedError' || v.muted) throw error;
+        // A background-opened history tab may be denied audible autoplay.
+        // Start muted, then restore the user's original audio state immediately.
+        v.muted = true;
+        try {
+          await v.play();
+        } finally {
+          v.muted = false;
+        }
+      }
       return true;
     }
     if (m.action === 'toggle') {

@@ -61,6 +61,47 @@ export async function remove(store, id) {
   });
 }
 
+// Remove one studied video and its dependent data in a single transaction.
+// Several transcript revisions can share a videoKey, so deleting only the
+// currently selected record would leave a ghost entry in learning history.
+export async function deleteVideoHistory(videoKey) {
+  const d = await db();
+  return new Promise((resolve, reject) => {
+    const t = d.transaction(['videos', 'notes', 'chats', 'audio', 'aiCache'], 'readwrite');
+    const deletedRecordIds = new Set();
+    // Cache keys are content hashes without video provenance; clear the shared
+    // cache so deleted transcripts cannot remain in model responses.
+    t.objectStore('aiCache').clear();
+    const videos = t.objectStore('videos').openCursor();
+    videos.onsuccess = () => {
+      const cursor = videos.result;
+      if (!cursor) {
+        for (const name of ['notes', 'chats', 'audio']) {
+          const request = t.objectStore(name).openCursor();
+          request.onsuccess = () => {
+            const related = request.result;
+            if (!related) return;
+            if (related.value.videoKey === videoKey || deletedRecordIds.has(related.value.recordId))
+              related.delete();
+            related.continue();
+          };
+          request.onerror = () => t.abort();
+        }
+        return;
+      }
+      if (cursor.value.videoKey === videoKey) {
+        deletedRecordIds.add(cursor.value.id);
+        cursor.delete();
+      }
+      cursor.continue();
+    };
+    videos.onerror = () => t.abort();
+    t.oncomplete = () => resolve([...deletedRecordIds]);
+    t.onerror = () => reject(storageError(t.error));
+    t.onabort = () => reject(storageError(t.error) || new Error('学习记录删除已回滚'));
+  });
+}
+
 // Summarise saved JSON without returning keys, transcripts or note content.
 // Cursor traversal avoids loading all long-video records at once.
 export async function statistics() {

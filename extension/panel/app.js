@@ -3029,7 +3029,10 @@ if (ext) {
       load();
     if (m.event === 'note-saved' && (m.recordId === record?.id || $('#note-scope').value === 'all'))
       hydrate().catch(error);
-    if (['audio-saved', 'audio-save-failed'].includes(m.event) && $('#local-audio-library').open)
+    if (
+      ['audio-saved', 'audio-save-failed', 'audio-progress', 'history-deleted'].includes(m.event) &&
+      $('#local-audio-library').open
+    )
       refreshAudioLibrary().catch(error);
     if (m.event === 'asr-progress' && m.recordId === record?.id) {
       record.transcriptMeta.asrSegments = m.segments;
@@ -4176,25 +4179,57 @@ async function refreshAudioLibrary() {
         button('复制视频链接', () => copy(entry.url)),
       );
     if (entry.clips.length) box.append(button('打开本地学习', () => openLocalAudio(entry)));
-    if (
-      !complete &&
-      entry.audioStatus?.state !== 'saving' &&
-      ['youtube', 'bilibili'].includes(entry.platform)
-    )
-      box.append(
-        button('后台保存音频', async () => {
-          if (!tabId || record?.videoKey !== entry.videoKey || localAudioMode)
-            throw new Error('请先打开并读取这个视频，再保存音频。');
-          await rpc('SAVE_VIDEO_AUDIO', { recordId: entry.recordId, tabId, retry: true });
+    const save = button(complete ? '音频已完整保存' : '保存完整音频', async () => {
+      await rpc('SAVE_VIDEO_AUDIO', {
+        recordId: entry.recordId,
+        ...(record?.videoKey === entry.videoKey && !localAudioMode && tabId ? { tabId } : {}),
+        retry: true,
+      });
+      await refreshAudioLibrary();
+    });
+    save.disabled = complete || entry.audioStatus?.state === 'saving';
+    save.title =
+      entry.platform === 'migu'
+        ? '咪咕会从视频开头自动播放并实时采集完整音频，耗时约等于视频长度。'
+        : '优先在后台下载独立音轨；不可下载时从开头自动播放并采集。';
+    box.append(save);
+    box.append(
+      button(
+        '删除记录',
+        async () => {
+          if (
+            !confirm(
+              `删除「${entry.title}」的学习记录？对应字幕、译文、重点词、笔记、问答和本地音频都会永久删除；共享模型缓存也会清空。`,
+            )
+          )
+            return;
+          const deletingCurrent = record?.videoKey === entry.videoKey;
+          if (deletingCurrent) await leaveVideo();
+          await rpc('DELETE_VIDEO_HISTORY', { videoKey: entry.videoKey });
+          if (deletingCurrent) {
+            generation++;
+            localPlayer.dispose();
+            localAudioMode = false;
+            $('#audio-video-mode').hidden = true;
+            record = null;
+            tabId = null;
+            notes = [];
+            chats = [];
+            active = -1;
+            render();
+          }
           await refreshAudioLibrary();
-        }),
-      );
+          toast('学习记录已删除');
+        },
+        'text-btn history-delete',
+      ),
+    );
     if (entry.audioStatus?.state === 'saving') {
       box.append(
         el(
           'p',
           'hint',
-          `正在后台保存音频 · ${(entry.audioStatus.bytes / 1048576).toFixed(1)} MB${entry.audioStatus.total ? ` / ${(entry.audioStatus.total / 1048576).toFixed(1)} MB` : ''}`,
+          `${entry.audioStatus.method === 'playback' ? '正在实时播放并采集' : '正在后台下载'}音频 · ${entry.audioStatus.seconds != null ? `${formatTime(entry.audioStatus.seconds)} / ${formatTime(entry.audioStatus.totalSeconds || entry.duration)} · ` : ''}${(entry.audioStatus.bytes / 1048576).toFixed(1)} MB${entry.audioStatus.total ? ` / ${(entry.audioStatus.total / 1048576).toFixed(1)} MB` : ''}`,
         ),
       );
       box.append(

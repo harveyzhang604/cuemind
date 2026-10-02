@@ -57,6 +57,106 @@ async function prepare(m) {
     throw e;
   }
 }
+async function waitForAudioTime(s, target) {
+  let lastTime = -1;
+  let lastProgressAt = Date.now();
+  while (!s.stopping) {
+    const current = await position(s);
+    if (current.mediaErrorCode || current.unavailable)
+      throw new Error('播放器报告媒体错误，音频采集已停止。');
+    if (current.time >= target || current.time >= current.duration - 0.15) return current;
+    if (current.paused) throw new Error('视频播放已暂停，整片音频采集已停止。');
+    if (current.time > lastTime + 0.1) {
+      lastTime = current.time;
+      lastProgressAt = Date.now();
+    } else if (Date.now() - lastProgressAt > 60000) {
+      throw new Error('视频超过 60 秒未继续播放，已保留此前采集的音频。');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return null;
+}
+
+function startAudioRecorder(s, start) {
+  const chunks = [];
+  const recorder = new MediaRecorder(s.stream, {
+    mimeType: 'audio/webm;codecs=opus',
+    audioBitsPerSecond: 64000,
+  });
+  const entry = { recorder, start };
+  entry.blob = new Promise((resolve, reject) => {
+    recorder.ondataavailable = (event) => {
+      if (event.data.size) chunks.push(event.data);
+    };
+    recorder.onerror = (event) => reject(event.error || new Error('音频录制失败'));
+    recorder.onstop = () => resolve(new Blob(chunks, { type: 'audio/webm' }));
+  });
+  s.recorders.add(entry);
+  recorder.start();
+  return entry;
+}
+
+async function saveAudioRecorder(s, entry) {
+  if (entry.recorder.state !== 'inactive') entry.recorder.stop();
+  const blob = await entry.blob;
+  s.recorders.delete(entry);
+  const endState = await position(s).catch(() => null);
+  const end = Math.min(s.plan[0].end, Number(endState?.time) || entry.start);
+  if (blob.size < 1000 || end <= entry.start + 0.1) return;
+  await saveAudio({
+    videoKey: s.videoKey,
+    recordId: s.recordId,
+    segmentId: crypto.randomUUID(),
+    start: entry.start,
+    end,
+    blob,
+  });
+  const reply = await send({
+    type: 'ASR_CHUNK',
+    recordId: s.recordId,
+    segmentId: s.plan[0].id,
+    capturedEnd: end,
+    segments: [],
+    completed: ++s.completed,
+  });
+  if (!reply?.ok) throw new Error(reply?.error || '本地音频保存失败');
+}
+
+async function recordAudioOnly(s) {
+  s.recorders = new Set();
+  let current = null;
+  try {
+    const initial = await waitForAudioTime(s, s.plan[0].start);
+    if (!initial) return;
+    current = startAudioRecorder(s, initial.time);
+    const duration = s.plan[0].end;
+    let boundary = Math.min(duration, initial.time + 10);
+    while (!s.stopping && boundary < duration - 0.2) {
+      const overlap = await waitForAudioTime(s, boundary - 1);
+      if (!overlap) break;
+      const next = startAudioRecorder(s, overlap.time);
+      const boundaryState = await waitForAudioTime(s, boundary);
+      await saveAudioRecorder(s, current);
+      current = next;
+      if (!boundaryState) break;
+      boundary = Math.min(duration, boundary + 120);
+    }
+    if (!s.stopping) await waitForAudioTime(s, duration - 0.15);
+  } catch (error) {
+    if (!s.controller.signal.aborted) s.errors.push(error.message);
+    s.stopping = true;
+  } finally {
+    for (const entry of [...s.recorders]) {
+      try {
+        await saveAudioRecorder(s, entry);
+      } catch (error) {
+        if (!s.controller.signal.aborted) s.errors.push(error.message);
+      }
+    }
+    s.stopping = true;
+    await finish(s);
+  }
+}
 async function recordChunk(s) {
   if (s.stopping) return finish(s);
   try {
@@ -260,6 +360,7 @@ function stop(s, { cancel = false, discard = false, reason } = {}) {
   s.discardCurrent ||= discard || cancel;
   if (reason && !s.errors.includes(reason)) s.errors.push(reason);
   if (cancel) s.controller.abort();
+  if (s.audioOnly && s.audioOnlyRun) return;
   if (s.recorder?.state !== 'inactive' && s.recorder) s.recorder.stop();
   else finish(s);
 }
@@ -299,6 +400,11 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       return;
     }
     const session = state;
+    if (session.audioOnly) {
+      session.audioOnlyRun = recordAudioOnly(session);
+      reply({ ok: true });
+      return;
+    }
     recordChunk(session)
       .then(() =>
         reply({

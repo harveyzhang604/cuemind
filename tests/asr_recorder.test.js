@@ -4,6 +4,69 @@ import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
 import { planAsrSegments } from '../extension/core/asr-progress.js';
 
+test('audio-only recording covers a long video with overlapping playable clips and no ASR calls', async () => {
+  const source = (
+    await readFile(new URL('../extension/offscreen/recorder.js', import.meta.url), 'utf8')
+  ).replace(/^import [^\n]+\n/gm, '');
+  let listener;
+  let playhead = 0;
+  let transcribes = 0;
+  const clips = [];
+  const messages = [];
+  class Recorder {
+    state = 'inactive';
+    start() { this.state = 'recording'; }
+    stop() {
+      this.state = 'inactive';
+      this.ondataavailable({ data: new Blob([new Uint8Array(1500)], { type: 'audio/webm' }) });
+      this.onstop();
+    }
+  }
+  class Audio {
+    createMediaStreamSource() { return { connect() {} }; }
+    async resume() {}
+    async close() {}
+    get destination() { return {}; }
+  }
+  const context = {
+    AbortController, Blob, MediaRecorder: Recorder, AudioContext: Audio, crypto: globalThis.crypto,
+    saveAudio: async clip => { clips.push(clip); },
+    transcribe: async () => { transcribes++; return []; },
+    prepareSpeechAudio: async blob => blob, isQwenAsr: () => false,
+    navigator: { mediaDevices: { getUserMedia: async () => ({
+      getAudioTracks: () => [{ addEventListener() {} }], getTracks: () => [{ stop() {} }],
+    }) } },
+    setTimeout(fn, ms) { playhead = Math.min(130, playhead + ms / 1000); queueMicrotask(fn); return 1; },
+    clearTimeout() {}, clearInterval() {}, setInterval() { return 1; },
+    chrome: { runtime: { id: 'fixture', getURL: path => `chrome-extension://fixture/${path}`,
+      onMessage: { addListener(fn) { listener = fn; } },
+      async sendMessage(message) {
+        messages.push(message);
+        return message.type === 'CAPTURE_POSITION'
+          ? { ok: true, data: { time: playhead, duration: 130, paused: false, rate: 1 } }
+          : { ok: true };
+      },
+    } },
+  };
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  const sender = { id: 'fixture', url: 'chrome-extension://fixture/background.js' };
+  const command = (type, fields = {}) => new Promise(resolve => {
+    listener({ target: 'offscreen', type, recordId: 'video', ...fields }, sender, resolve);
+  });
+  assert.equal((await command('START', { streamId: 'stream', settings: {}, audioOnly: true,
+    videoKey: 'migu:event:programme', plan: [{ id: 'whole', start: 0, end: 130 }] })).ok, true);
+  assert.equal((await command('RUN')).ok, true);
+  for (let i = 0; i < 100 && !messages.some(m => m.type === 'ASR_FINISHED'); i++)
+    await new Promise(setImmediate);
+  assert.ok(messages.some(m => m.type === 'ASR_FINISHED'));
+  assert.equal(transcribes, 0);
+  assert.equal(clips.length, 2);
+  assert.equal(clips[0].start, 0);
+  assert.ok(clips[1].start < clips[0].end, 'clips overlap to prevent a boundary gap');
+  assert.equal(clips[1].end, 130);
+});
+
 test('offscreen recorder advances from a 10-second segment to the next one-minute segment', async () => {
   const source = (
     await readFile(new URL('../extension/offscreen/recorder.js', import.meta.url), 'utf8')

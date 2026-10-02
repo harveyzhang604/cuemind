@@ -3244,6 +3244,13 @@ main,
 .local-audio-library button {
   margin: 4px;
 }
+.local-audio-library .history-delete {
+  color: #a3462e;
+}
+.local-audio-library button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 .local-audio-clip {
   display: flex;
   flex-wrap: wrap;

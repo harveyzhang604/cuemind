@@ -42,7 +42,12 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
 // Reattach only the player bridge; do not reload pages, start AI, or change data.
 async function reconnectVideoTabs() {
   const tabs = await chrome.tabs.query({
-    url: ['https://www.youtube.com/*', 'https://www.bilibili.com/*'],
+    url: [
+      'https://www.youtube.com/*',
+      'https://www.bilibili.com/*',
+      'https://www.miguvideo.com/*',
+      'https://miguvideo.com/*',
+    ],
   });
   return Promise.allSettled(
     tabs
@@ -180,18 +185,31 @@ function supportedAudioUrl(platform, value) {
 
 async function downloadVideoAudio(record, tabId, controller) {
   const { videoInfo: info, videoKey: key } = record;
-  const result = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    func: inspectAudioSource,
-    args: [key],
-  });
-  const candidates = result[0]?.result || [];
+  let candidates = [];
+  let inspectError;
+  const deadline = Date.now() + 15000;
+  do {
+    if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
+    try {
+      const result = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: inspectAudioSource,
+        args: [key],
+      });
+      candidates = result[0]?.result || [];
+      if (candidates.length) break;
+    } catch (error) {
+      inspectError = error;
+      if (/视频已切换/.test(error.message)) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
   const maxBytes = 250 * 1048576;
   const sources = candidates.filter(
     (item) => supportedAudioUrl(info.platform, item.url) && item.bytes <= maxBytes,
   );
-  if (!sources.length) throw new Error('当前播放器没有可访问的音频文件；可用播放采集保存。');
+  if (!sources.length) throw new Error(inspectError?.message || '当前播放器没有可访问的独立音轨');
   let downloaded;
   let lastError;
   for (const source of sources.slice(0, 4)) {
@@ -256,32 +274,171 @@ async function downloadVideoAudio(record, tabId, controller) {
   notify({ event: 'audio-saved', videoKey: key });
 }
 
+async function audioTab(record, preferredTabId, signal) {
+  const candidates = [];
+  if (Number.isInteger(preferredTabId)) candidates.push(preferredTabId);
+  for (const tab of await chrome.tabs.query({}))
+    if (Number.isInteger(tab.id) && matchesVideoUrl(record.videoKey, tab.url))
+      candidates.push(tab.id);
+  for (const id of new Set(candidates)) {
+    try {
+      const tab = await chrome.tabs.get(id);
+      if (!matchesVideoUrl(record.videoKey, tab.url)) continue;
+      return { id, created: false };
+    } catch {}
+  }
+  if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+  if (!matchesVideoUrl(record.videoKey, record.videoInfo.url))
+    throw new Error('学习历史缺少有效视频链接，请先打开视频并重新读取。');
+  const tab = await chrome.tabs.create({
+    url: record.videoInfo.url,
+    active: record.videoInfo.platform === 'migu',
+  });
+  if (!Number.isInteger(tab.id)) throw new Error('无法打开历史视频。');
+  return { id: tab.id, created: true };
+}
+
+async function waitForAudioPage(record, tabId, signal) {
+  const deadline = Date.now() + 30000;
+  let lastError;
+  while (Date.now() < deadline) {
+    if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (!matchesVideoUrl(record.videoKey, tab.url)) throw new Error('视频已切换');
+      if (tab.status === 'complete') return;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  throw new Error(`等待历史视频加载超时：${lastError?.message || '页面未完成加载'}`);
+}
+
+async function captureFullAudio(record, tabId, controller) {
+  let state;
+  const playerDeadline = Date.now() + 20000;
+  while (Date.now() < playerDeadline) {
+    if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
+    try {
+      state = await player(tabId, { action: 'state' });
+      if (state) break;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  if (!state) throw new Error('视频播放器尚未加载，请打开视频并开始播放后重试。');
+  if (state.videoKey !== record.videoKey && record.videoInfo.platform === 'migu') {
+    const programme = record.videoKey.split(':')[2];
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline && state.videoKey !== record.videoKey) {
+      if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: (id) => {
+          const item = document.querySelector(`.match-review__slide[data-program-id="${id}"]`);
+          if (item && !item.classList.contains('is-active')) item.click();
+        },
+        args: [programme],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      state = await player(tabId, { action: 'state' });
+    }
+    if (state.videoKey !== record.videoKey)
+      throw new Error('无法切换到这条咪咕历史记录对应的场次，请在视频页选择该场次后重试。');
+  }
+  if (state.videoKey !== record.videoKey) throw new Error('视频已切换，请重新保存音频。');
+  if (!Number.isFinite(state.duration) || state.duration <= 1)
+    throw new Error('播放器尚未提供完整视频时长，请开始播放后重试。');
+  await player(tabId, { action: 'pause', videoKey: record.videoKey });
+  await player(tabId, { action: 'seek', time: 0, videoKey: record.videoKey });
+  const readyDeadline = Date.now() + 20000;
+  let ready = false;
+  while (Date.now() < readyDeadline) {
+    if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
+    const current = await player(tabId, { action: 'state', videoKey: record.videoKey });
+    if (!current.seeking && current.readyState >= 2 && current.time < 1.5) {
+      ready = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (!ready) throw new Error('视频跳到开头后没有准备好音频，请恢复播放后重试。');
+  if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
+  let started;
+  try {
+    started = await route({
+      type: 'CAPTURE_START',
+      recordId: record.id,
+      tabId,
+      audioOnly: true,
+      originallyPaused: state.paused,
+    });
+  } catch (error) {
+    await player(tabId, { action: 'seek', time: state.time, videoKey: record.videoKey }).catch(
+      () => {},
+    );
+    if (!state.paused)
+      await player(tabId, { action: 'play', videoKey: record.videoKey }).catch(() => {});
+    throw error;
+  }
+  if (controller.signal.aborted) await stopCapture({ cancel: true });
+  return started;
+}
+
 async function startVideoAudioDownload(recordId, tabId, retry = false) {
   const record = await requireRecord(recordId);
   const { videoKey: key, videoInfo: info } = record;
-  if (!['youtube', 'bilibili'].includes(info.platform)) return { state: 'unsupported' };
+  if (!['youtube', 'bilibili', 'migu'].includes(info.platform)) return { state: 'unsupported' };
   if (!Number.isFinite(info.duration) || info.duration <= 0) {
     const result = { state: 'unavailable', error: '播放器尚未提供视频时长。' };
     audioDownloads.set(key, result);
     return result;
   }
   const existing = audioDownloads.get(key);
-  if (existing?.state === 'saving' || (existing?.state === 'failed' && !retry)) return existing;
+  if (existing?.state === 'saving') return existing;
   const clips = await audioClips(key);
   if (audioDownloads.get(key)?.state === 'saving') return audioDownloads.get(key);
   if (
     audioCoverage(clips).ranges.some(
       (range) => range.start <= 0.5 && range.end >= info.duration - 1,
     )
-  )
+  ) {
+    audioDownloads.set(key, { state: 'saved' });
     return { state: 'saved' };
-  const tab = await chrome.tabs.get(tabId);
-  if (!matchesVideoUrl(key, tab.url)) throw new Error('视频已切换，请重新读取。');
+  }
+  if (existing?.state === 'failed' && !retry) return existing;
   const controller = new AbortController();
   audioDownloads.set(key, { state: 'saving', bytes: 0 });
   const taskId = `audio:${key}`;
-  tasks.set(taskId, { controller, recordId: taskId, capability: 'audio-download' });
-  downloadVideoAudio(record, tabId, controller)
+  const task = { controller, recordId: taskId, capability: 'audio-download' };
+  tasks.set(taskId, task);
+  task.promise = (async () => {
+    const target = await audioTab(record, tabId, controller.signal);
+    if (target.created) task.createdTabId = target.id;
+    try {
+      if (target.created) await waitForAudioPage(record, target.id, controller.signal);
+      if (info.platform === 'migu') {
+        await captureFullAudio(record, target.id, controller);
+        // The offscreen recorder finishes asynchronously. ASR_FINISHED will
+        // update audioDownloads and release this task.
+        return;
+      }
+      try {
+        await downloadVideoAudio(record, target.id, controller);
+      } catch (error) {
+        if (!retry || controller.signal.aborted || /视频已切换/.test(error.message)) throw error;
+        // Some player URLs require a signature or deny extension fetches. Use
+        // the real player as the final fallback; this takes playback time.
+        await chrome.tabs.update(target.id, { active: true });
+        audioDownloads.set(key, { state: 'saving', bytes: 0, fallback: true });
+        await captureFullAudio(record, target.id, controller);
+      }
+    } finally {
+      if (target.created && (!capture?.audioOnly || capture.videoKey !== key))
+        await chrome.tabs.remove(target.id).catch(() => {});
+    }
+  })()
     .catch((error) => {
       audioDownloads.set(
         key,
@@ -291,7 +448,9 @@ async function startVideoAudioDownload(recordId, tabId, retry = false) {
       );
       notify({ event: 'audio-save-failed', videoKey: key });
     })
-    .finally(() => tasks.delete(taskId));
+    .finally(() => {
+      if (!capture?.audioOnly || capture.videoKey !== key) tasks.delete(taskId);
+    });
   return { state: 'saving' };
 }
 async function player(tabId, data) {
@@ -810,7 +969,12 @@ async function route(m) {
         (!m.capability || t.capability === m.capability)
       )
         t.controller.abort();
-    if (capture && (!m.recordId || capture.record?.id === m.recordId))
+    if (
+      capture &&
+      (!m.recordId ||
+        capture.record?.id === m.recordId ||
+        (capture.audioOnly && m.recordId === `audio:${capture.videoKey}`))
+    )
       await stopCapture({ cancel: true });
     return true;
   }
@@ -1182,6 +1346,11 @@ async function route(m) {
         const record = videos
           .filter((v) => v.videoKey === key)
           .sort((a, b) => (b.sentences?.length || 0) - (a.sentences?.length || 0))[0];
+        const complete =
+          record?.videoInfo?.duration > 0 &&
+          audioCoverage(group).ranges.some(
+            (range) => range.start <= 0.5 && range.end >= record.videoInfo.duration - 1,
+          );
         return record
           ? {
               recordId: record.id,
@@ -1191,7 +1360,7 @@ async function route(m) {
               platform: record.videoInfo.platform,
               duration: record.videoInfo.duration,
               updatedAt: record.lastStudiedAt || record.updatedAt,
-              audioStatus: audioDownloads.get(key) || null,
+              audioStatus: complete ? { state: 'saved' } : audioDownloads.get(key) || null,
               clips: group,
             }
           : null;
@@ -1201,6 +1370,27 @@ async function route(m) {
   }
   if (m.type === 'SAVE_VIDEO_AUDIO')
     return startVideoAudioDownload(m.recordId, m.tabId, m.retry === true);
+  if (m.type === 'DELETE_VIDEO_HISTORY') {
+    if (restoring) throw new Error('正在恢复备份');
+    const key = String(m.videoKey || '');
+    const records = (await db.all('videos')).filter((item) => item.videoKey === key);
+    if (!records.length) return false;
+    if (
+      capture?.videoKey === key ||
+      [...tasks.values()].some(
+        (task) =>
+          task.recordId === `audio:${key}` ||
+          records.some((item) => task.recordId === item.id) ||
+          task.capability === 'load',
+      )
+    )
+      throw new Error('这条视频正在处理，请等待完成或先取消任务。');
+    await db.deleteVideoHistory(key);
+    audioDownloads.delete(key);
+    await chrome.storage.local.remove(`lastRecord:${key}`);
+    notify({ event: 'history-deleted', videoKey: key });
+    return true;
+  }
   if (m.type === 'RETRY_SAVED_AUDIO')
     return locked(m.recordId, 'asr', async (signal) => {
       const record = await requireRecord(m.recordId),
@@ -1353,7 +1543,7 @@ async function route(m) {
         }
       }
       session.previousRate = state.rate;
-      session.wasPaused = state.paused;
+      session.wasPaused = session.audioOnly ? m.originallyPaused === true : state.paused;
       session.videoKey = original.videoKey;
       session.startTime = state.time;
       session.translationSignature = translationSignature(cfg, {
@@ -1375,9 +1565,11 @@ async function route(m) {
       session.retryRange = Number.isFinite(m.rangeEnd)
         ? { start: session.startTime, end: Math.min(state.duration, m.rangeEnd) }
         : null;
-      session.plan = planAsrSegments(state.time, rangeEnd, () => crypto.randomUUID()).map(
-        (segment) => ({ ...segment, sessionId: session.id }),
-      );
+      session.plan = (
+        session.audioOnly
+          ? [{ id: crypto.randomUUID(), start: state.time, end: rangeEnd, status: 'capturing' }]
+          : planAsrSegments(state.time, rangeEnd, () => crypto.randomUUID())
+      ).map((segment) => ({ ...segment, sessionId: session.id }));
       if (!session.plan.length) throw new Error('视频末尾没有足够音频可识别。');
       await player(m.tabId, { action: 'pause', videoKey: original.videoKey });
       await player(m.tabId, { action: 'capture-lock', locked: true, videoKey: original.videoKey });
@@ -1433,9 +1625,9 @@ async function route(m) {
                   : segment,
               )
           : []),
-        ...session.plan,
+        ...(session.audioOnly ? [] : session.plan),
       ];
-      record.transcriptMeta.asrSessionId = session.id;
+      if (!session.audioOnly) record.transcriptMeta.asrSessionId = session.id;
       if (session.migu) {
         selectFocusConfig(
           record,
@@ -1445,6 +1637,14 @@ async function route(m) {
         selectFocusConfig(record, original.focusConfig);
       }
       session.record = record;
+      session.audioOnly &&
+        audioDownloads.set(record.videoKey, {
+          state: 'saving',
+          method: 'playback',
+          bytes: 0,
+          seconds: 0,
+          totalSeconds: record.videoInfo.duration,
+        });
       const reply = await chrome.runtime.sendMessage({
         target: 'offscreen',
         type: 'START',
@@ -1456,8 +1656,10 @@ async function route(m) {
         plan: session.plan,
       });
       if (!reply?.ok) throw new Error(reply?.error || '音频识别启动失败');
-      await store(record);
-      await remember(record);
+      if (!session.audioOnly) {
+        await store(record);
+        await remember(record);
+      }
       await player(m.tabId, {
         action: 'rate',
         rate: 1,
@@ -1498,6 +1700,8 @@ async function releaseCapture(s, restorePlaying = false) {
   await player(s.tabId, { action: 'rate', rate: s.previousRate, videoKey: s.videoKey }).catch(
     () => {},
   );
+  if (s.audioOnly && s.wasPaused)
+    await player(s.tabId, { action: 'pause', videoKey: s.videoKey }).catch(() => {});
   if (restorePlaying && !s.wasPaused)
     await player(s.tabId, { action: 'play', videoKey: s.videoKey }).catch(() => {});
 }
@@ -1519,6 +1723,14 @@ async function stopCapture(options = {}) {
   } catch (e) {
     await releaseCapture(s);
     if (capture === s) capture = null;
+    if (s.audioOnly) {
+      audioDownloads.set(s.videoKey, { state: 'failed', error: e.message });
+      const createdTabId = tasks.get(`audio:${s.videoKey}`)?.createdTabId;
+      tasks.delete(`audio:${s.videoKey}`);
+      if (createdTabId) await chrome.tabs.remove(createdTabId).catch(() => {});
+      notify({ event: 'audio-save-failed', videoKey: s.videoKey });
+      return;
+    }
     if (s.record) {
       s.record.transcriptMeta.partial = true;
       s.record.transcriptMeta.error = e.message;
@@ -1662,7 +1874,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     notify({ ...m, event: m.type, tabId: sender.tab.id });
     const s = capture;
     if (s?.started && s.tabId === sender.tab.id && !s.stopping) {
-      const clock = m.type === 'PLAYER_TICK' ? captureClockProblem(s, m) : null;
+      const clock = m.type === 'PLAYER_TICK' && !s.audioOnly ? captureClockProblem(s, m) : null;
       if (clock?.stale) return;
       const interruption =
         m.type === 'PAGE_CHANGED' || m.videoKey !== s.videoKey
@@ -1701,6 +1913,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       if (s?.record?.id !== m.recordId) throw new Error('音频识别会话已结束');
       if (!['capturing', 'queued', 'recognizing', 'failed'].includes(m.status))
         throw new Error('音频识别状态无效');
+      if (s.audioOnly) return;
       await captureWrite(s, async () => {
         const segment = captureSegment(s, m.segmentId);
         if (!segment) throw new Error('音频片段不存在');
@@ -1728,6 +1941,20 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     (async () => {
       const s = capture;
       if (s?.record?.id !== m.recordId) throw new Error('音频识别会话已结束');
+      if (s.audioOnly) {
+        s.completed = m.completed;
+        const clips = await audioClips(s.videoKey);
+        const coverage = audioCoverage(clips);
+        audioDownloads.set(s.videoKey, {
+          state: 'saving',
+          method: 'playback',
+          bytes: coverage.bytes,
+          seconds: coverage.seconds,
+          totalSeconds: s.record.videoInfo.duration,
+        });
+        notify({ event: 'audio-progress', videoKey: s.videoKey });
+        return;
+      }
       await captureWrite(s, async () => {
         const r = s.record;
         const segment = captureSegment(s, m.segmentId);
@@ -1826,6 +2053,32 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       if (s?.record?.id !== m.recordId) return;
       await s.translationQueue;
       await s.writeQueue;
+      if (s.audioOnly) {
+        const coverage = audioCoverage(await audioClips(s.videoKey));
+        const duration = s.record.videoInfo.duration;
+        const complete =
+          !m.error &&
+          !m.canceled &&
+          coverage.ranges.some((range) => range.start <= 0.5 && range.end >= duration - 1);
+        audioDownloads.set(
+          s.videoKey,
+          complete
+            ? { state: 'saved', bytes: coverage.bytes, seconds: duration }
+            : {
+                state: m.canceled ? 'paused' : 'failed',
+                bytes: coverage.bytes,
+                seconds: coverage.seconds,
+                error: m.error || (m.canceled ? '已取消' : '音频尚未完整覆盖视频'),
+              },
+        );
+        await releaseCapture(s);
+        if (capture === s) capture = null;
+        const createdTabId = tasks.get(`audio:${s.videoKey}`)?.createdTabId;
+        tasks.delete(`audio:${s.videoKey}`);
+        if (createdTabId) await chrome.tabs.remove(createdTabId).catch(() => {});
+        notify({ event: complete ? 'audio-saved' : 'audio-save-failed', videoKey: s.videoKey });
+        return;
+      }
       if (m.error || m.canceled) {
         s.record.transcriptMeta.partial = true;
         s.record.transcriptMeta.error = m.error || (m.canceled ? '剩余转写已取消' : '');
