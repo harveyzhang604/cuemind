@@ -11,7 +11,7 @@ import {normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCapt
 import {localSentences,paragraphs} from '../extension/core/sentence.js';
 import {keyFromUrl,matchesVideoUrl} from '../extension/core/video.js';
 import {captureClockProblem,planAsrSegments,skipRecognizedAudio} from '../extension/core/asr-progress.js';
-import {canReuseTranscript} from '../extension/services/platform.js';
+import {canReuseTranscript,mismatchedOriginalTrack} from '../extension/services/platform.js';
 import {taskConflict} from '../extension/core/task-lock.js';
 import {clearLearningCache,dataActions} from '../extension/core/local-data.js';
 import {recoverEquivalentLearning,recoverOrphanedFocus} from '../extension/core/record-recovery.js';
@@ -23,7 +23,7 @@ async function fixture(existingStorage){
  const audioClips=async key=>[...stores.audio.values()].filter(clip=>!key||clip.videoKey===key).map(({blob,...clip})=>clip);
  const audioCoverage=clips=>({ranges:clips.map(clip=>({start:clip.start,end:clip.end}))});
  const saveAudio=async clip=>{stores.audio.set(clip.videoKey+':'+clip.segmentId,{...clip,id:clip.videoKey+':'+clip.segmentId,bytes:clip.blob.size});};
- const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,ReadableStream,Blob,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,audioClips,audioCoverage,saveAudio,inspectAudioSource:()=>{},
+ const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,ReadableStream,Blob,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,mismatchedOriginalTrack,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,audioClips,audioCoverage,saveAudio,inspectAudioSource:()=>{},
  db:{get:async(name,id)=>structuredClone(stores[name].get(id)),all:async name=>structuredClone([...stores[name].values()]),put:async(name,value)=>{stores[name].set(value.id,structuredClone(value));return value;},remove:async(name,id)=>stores[name].delete(id),deleteVideoHistory:async key=>{const ids=[...stores.videos.values()].filter(v=>v.videoKey===key).map(v=>v.id);for(const [name,store] of Object.entries(stores)){if(name==='aiCache'){store.clear();continue;}for(const [id,value] of store)if(value.videoKey===key||ids.includes(value.recordId))store.delete(id);}return ids;},updateNote:async(id,expected,change)=>{const n=stores.notes.get(id);if(n?.updatedAt!==expected)return null;const next={...n,...change};stores.notes.set(id,structuredClone(next));return next;},manage:async(action,transform)=>{if(action==='reset'){Object.values(stores).forEach(s=>s.clear());}else if(action==='delete-notes')stores.notes.clear();else{stores.chats.clear();for(const [id,r]of stores.videos)stores.videos.set(id,transform(r));}}},
  chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),remove:async k=>{delete storage[k];},clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},scripting:{executeScript:async()=>[{result:[]}]},tabs:{get:async()=>({id:1,url:inspection.info.url,status:'complete'}),query:async()=>[{id:1,url:inspection.info.url,status:'complete'}],create:async({url})=>({id:2,url,status:'complete'}),update:async()=>{},remove:async()=>{},sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
  context.cachedCompletion=(...args)=>context.completion(...args.slice(0,5));
@@ -46,6 +46,19 @@ test('learning history keeps video links and independently downloaded audio',asy
  assert.equal(history[0].clips[0].end,30);
  assert.equal(f.stores.audio.values().next().value.blob.size,4);
  assert.equal((await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1})).state,'saved');
+});
+test('Bilibili English audio never reuses a cached Chinese translation as the original',async()=>{
+ const f=await fixture();
+ f.inspection.info={platform:'bilibili',videoId:'BVfixture',page:1,title:'【Easy English】英语口语练习',duration:60,audioLanguage:'',url:'https://www.bilibili.com/video/BVfixture/?p=1'};
+ f.inspection.tracks=[{id:'zh-track',language:'ai-zh',label:'中文',isAi:true}];
+ const key=videoKey(f.inspection.info),old={id:key+':zh-track',videoKey:key,videoInfo:f.inspection.info,rawCaptions:[{id:'old',start:0,end:3,text:'你好'}],transcriptMeta:{source:'bilibili_native',trackId:'zh-track',language:'ai-zh'},schemaVersion:SCHEMA_VERSION,updatedAt:1};
+ f.stores.videos.set(old.id,old);f.storage['lastRecord:'+key]=old.id;
+ const result=await f.route({type:'LOAD',tabId:1,trackId:'auto',videoKey:key});
+ assert.equal(result.needASR,true);
+ assert.equal(result.record.transcriptMeta.source,'bilibili_audio');
+ assert.equal(result.record.sentences.length,0);
+ assert.match(result.warning,/中文字幕/);
+ assert.equal(f.stores.videos.get(old.id).rawCaptions.length,1);
 });
 test('unavailable direct audio leaves history intact and can be retried',async()=>{
  const f=await fixture();f.context.fetchSupadata=async()=>({raw:[],language:'en'});

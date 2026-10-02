@@ -1,6 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {inspectPage,inspectAudioSource,canReuseTranscript} from '../extension/services/platform.js';
+import vm from 'node:vm';
+import {inspectPage,inspectAudioSource,canReuseTranscript,inferredSpokenLanguage,mismatchedOriginalTrack} from '../extension/services/platform.js';
+
+test('Chinese captions on an explicitly English Bilibili lesson are not English originals',()=>{
+ const info={platform:'bilibili',title:'【Easy English】日常英语口语练习',audioLanguage:''};
+ assert.equal(inferredSpokenLanguage(info),'en');
+ assert.equal(mismatchedOriginalTrack(info,{language:'ai-zh'}),true);
+ assert.equal(mismatchedOriginalTrack(info,{language:'en'}),false);
+ assert.equal(mismatchedOriginalTrack({...info,title:'中文配音的英语课',audioLanguage:'zh'},{language:'zh'}),false);
+ assert.equal(mismatchedOriginalTrack({...info,title:'普通视频',audioLanguage:''},{language:'zh'}),false);
+});
+test('Bilibili inspection works when Chrome injects the function without module imports',async()=>{
+ const location=new URL('https://www.bilibili.com/video/BVfixture/?p=1');
+ const injected=vm.runInNewContext('('+inspectPage.toString()+')',{
+  URL,AbortSignal,location,document:{querySelector:()=>({duration:60})},
+  fetch:async url=>({ok:true,json:async()=>String(url).includes('/view?')
+   ? {code:0,data:{title:'【Easy English】英语口语',desc:'',owner:{name:'author'},pages:[{cid:123,duration:60}]}}
+   : {code:0,data:{audio_language:'',subtitle:{subtitles:[{id:1,lan:'ai-zh',lan_doc:'中文',subtitle_url:'//a.hdslb.com/subtitle.json'}]}}}}),
+ });
+ const result=await injected(null,'bilibili:BVfixture:1','https://api.bilibili.com/x/player/wbi/v2?bvid=BVfixture&cid=123');
+ assert.equal(result.tracks[0].language,'ai-zh');
+ assert.equal(result.info.audioLanguage,'');
+});
 
 test('YouTube audio source uses the current player and excludes video-only streams',async()=>{
  const previous={location:globalThis.location,document:globalThis.document,window:globalThis.window};

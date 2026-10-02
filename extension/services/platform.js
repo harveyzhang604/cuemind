@@ -7,6 +7,28 @@ export function canReuseTranscript(record, tracks) {
   return !!tracks[0] && meta.trackId === tracks[0].id;
 }
 
+// Bilibili does not always report the spoken language. A Chinese-only caption
+// track on an explicitly English-learning video is commonly a translation,
+// not a transcript of the audio. Keep the guess separate from audioLanguage.
+export function inferredSpokenLanguage(info) {
+  if (info.audioLanguage) return info.audioLanguage;
+  return /(?:easy\s*english|english\s*(?:speaking|conversation|podcast)|英语(?:口语|听力))/i.test(
+    info.title || '',
+  )
+    ? 'en'
+    : '';
+}
+
+export function mismatchedOriginalTrack(info, track) {
+  if (!track || info.platform !== 'bilibili') return false;
+  const spoken = inferredSpokenLanguage(info).toLowerCase().split('-')[0];
+  const caption = String(track.language || '')
+    .replace(/^ai-/, '')
+    .toLowerCase()
+    .split('-')[0];
+  return !!spoken && !!caption && spoken !== caption;
+}
+
 // Runs in the video page so media URLs come from the player's current session.
 // Only return an audio-only URL; never download the video track or expose it to AI.
 export async function inspectAudioSource(expectedKey) {
@@ -129,6 +151,14 @@ export async function inspectPage(trackId, expectedKey, signedPlayerUrl) {
         Number(!sameLanguage(a.language, audioLanguage)) -
           Number(!sameLanguage(b.language, audioLanguage)) || Number(a.isAi) - Number(b.isAi),
     );
+  // executeScript serializes inspectPage without its module scope.
+  const inferredLanguage = (info) =>
+    info.audioLanguage ||
+    (/(?:easy\s*english|english\s*(?:speaking|conversation|podcast)|英语(?:口语|听力))/i.test(
+      info.title || '',
+    )
+      ? 'en'
+      : '');
   if (location.hostname === 'www.youtube.com') {
     const id = new URL(location.href).searchParams.get('v');
     if (!id) throw new Error('请打开 YouTube 视频播放页。');
@@ -281,7 +311,7 @@ export async function inspectPage(trackId, expectedKey, signedPlayerUrl) {
       isAi: t.lan.startsWith('ai-'),
       url: t.subtitle_url.startsWith('//') ? 'https:' + t.subtitle_url : t.subtitle_url,
     })),
-    info.audioLanguage,
+    inferredLanguage(info),
   );
   if (keyNow() !== `bilibili:${id}:${page}`) throw new Error('视频已切换，请重新加载。');
   return {

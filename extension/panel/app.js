@@ -506,7 +506,9 @@ function render() {
               ? `Supadata 字幕 · ${record.transcriptMeta.language || '原文'}`
               : record.transcriptMeta.source === 'migu_audio'
                 ? '咪咕音频 · 尚未生成字幕'
-                : `${record.transcriptMeta.isAi ? '平台自动字幕' : '平台人工字幕'}${record.transcriptMeta.language ? ' · ' + record.transcriptMeta.language : ''}`;
+                : record.transcriptMeta.source === 'bilibili_audio'
+                  ? 'B站中文字幕与英语原声不符 · 等待音频识别'
+                  : `${record.transcriptMeta.isAi ? '平台自动字幕' : '平台人工字幕'}${record.transcriptMeta.language ? ' · ' + record.transcriptMeta.language : ''}`;
     $('#video-meta').textContent =
       `${record.videoInfo.author || '视频'} · ${formatTime(record.videoInfo.duration)}${record.videoInfo.platform === 'bilibili' && record.videoInfo.page > 1 ? ` · P${record.videoInfo.page}` : ''}`;
   } else {

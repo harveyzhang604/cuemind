@@ -6,7 +6,12 @@ import { normalizeFocusConfig, selectFocusConfig } from './core/focus.js';
 import { focusState } from './services/focus.js';
 import { taskConflict } from './core/task-lock.js';
 import WBI from './services/wbi.js';
-import { inspectPage, inspectAudioSource, canReuseTranscript } from './services/platform.js';
+import {
+  inspectPage,
+  inspectAudioSource,
+  canReuseTranscript,
+  mismatchedOriginalTrack,
+} from './services/platform.js';
 import {
   normalizeCaptions,
   deduplicateAsrCaptions,
@@ -798,6 +803,12 @@ async function loadTranscript(m, signal) {
   let data = await page(m.tabId, null, m.videoKey);
   const key = videoKey(data.info),
     cfg = await settings();
+  const autoTrack = data.tracks?.[0];
+  const translatedTrackOnly =
+    (!m.trackId || m.trackId === 'auto') && mismatchedOriginalTrack(data.info, autoTrack);
+  if (translatedTrackOnly)
+    data.warning =
+      'B站目前只提供与视频英语原声不一致的中文字幕。它不能当作英文原文；请从视频开头播放并点击“从当前位置连续识别”，使用语音服务生成英文原文。也可在字幕设置中手动选用中文字幕。';
   const useSupadata =
     data.info.platform === 'youtube' &&
     (m.trackId === 'supadata' ||
@@ -815,9 +826,14 @@ async function loadTranscript(m, signal) {
     const name = 'lastRecord:' + key;
     const selected = (await chrome.storage.local.get(name))[name];
     const saved = selected ? await db.get('videos', selected) : null;
+    const savedIsOriginalChoice =
+      saved?.transcriptMeta?.selectedByUser ||
+      saved?.transcriptMeta?.source === 'import' ||
+      saved?.transcriptMeta?.source?.startsWith('whisper');
     if (
       saved?.schemaVersion === SCHEMA_VERSION &&
       !m.refresh &&
+      (!translatedTrackOnly || savedIsOriginalChoice) &&
       ((saved.transcriptMeta?.source === 'supadata_native' &&
         saved.transcriptMeta.selectedByUser) ||
         (canReuseTranscript(saved, data.tracks) &&
@@ -839,10 +855,12 @@ async function loadTranscript(m, signal) {
       return { record: saved, tracks: data.tracks, cached: true };
     }
   }
-  const track = data.tracks.find((t) => t.id === m.trackId) || data.track || data.tracks[0];
+  const track = translatedTrackOnly
+    ? null
+    : data.tracks.find((t) => t.id === m.trackId) || data.track || data.tracks[0];
   let id = useSupadata
     ? `${key}:supadata:${data.info.audioLanguage || 'auto'}`
-    : `${key}:${track?.id || 'default'}`;
+    : `${key}:${translatedTrackOnly ? 'original-audio' : track?.id || 'default'}`;
   const cached = await db.get('videos', id);
   if (cached?.rawCaptions?.length && !m.refresh && cached.schemaVersion === SCHEMA_VERSION) {
     await ensureVideo();
@@ -895,6 +913,10 @@ async function loadTranscript(m, signal) {
           r.schemaVersion === SCHEMA_VERSION &&
           r.videoKey === videoKey(data.info) &&
           r.rawCaptions?.length &&
+          (!translatedTrackOnly ||
+            r.transcriptMeta?.selectedByUser ||
+            r.transcriptMeta?.source === 'import' ||
+            r.transcriptMeta?.source?.startsWith('whisper')) &&
           (track ? r.transcriptMeta?.trackId === track.id : canReuseTranscript(r, data.tracks)),
       )
       .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -905,7 +927,7 @@ async function loadTranscript(m, signal) {
     data.info,
     raw,
     {
-      source: data.source,
+      source: translatedTrackOnly ? 'bilibili_audio' : data.source,
       trackId: supadataResult ? 'supadata' : track?.id,
       language: supadataResult?.language || track?.language,
       isAi: supadataResult ? null : track?.isAi,
