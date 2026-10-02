@@ -4114,7 +4114,14 @@ function saveReading() {
   chrome.storage.local.set({ ['reading:' + id]: state }).catch(() => {});
 }
 function saveWatchPosition() {
-  if (!ext || !record || record.videoInfo.platform === 'demo' || !Number.isFinite(time)) return;
+  if (
+    !ext ||
+    !chrome.storage?.local?.set ||
+    !record ||
+    record.videoInfo.platform === 'demo' ||
+    !Number.isFinite(time)
+  )
+    return;
   lastWatchSaveAt = Date.now();
   chrome.storage.local
     .set({ ['watch:' + record.videoKey]: { time: Math.max(0, time), updatedAt: lastWatchSaveAt } })

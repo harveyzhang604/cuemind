@@ -43,7 +43,10 @@ with sync_playwright() as p:
     page.wait_for_timeout(250)
     assert not page.locator('#cuemind-focus-captions').is_visible()
     stalled = command(action='state')
-    assert stalled['data']['unavailable'] is True, stalled
+    assert stalled['data']['unavailable'] is False, stalled
+    page.evaluate("Object.defineProperty(document.querySelector('video'),'error',{value:{code:4}})")
+    failed = command(action='state')
+    assert failed['data']['unavailable'] is True and failed['data']['mediaErrorCode'] == 4, failed
     browser.close()
 
-print('Migu clock passed: displayed time, current caption refresh, and stalled media guard.')
+print('Migu clock passed: displayed time, current caption refresh, buffering, and real media errors.')

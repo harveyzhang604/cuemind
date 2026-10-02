@@ -6,7 +6,7 @@ with preview_server() as base, sync_playwright() as p:
     page=browser.new_page();errors=[]
     page.on('pageerror',lambda e:errors.append(str(e)))
     page.add_init_script('''
-      window.pending=[];window.tabNumber=1;window.messages=[];
+      window.pending=[];window.tabNumber=1;window.messages=[];window.savedStorage={};
       window.chrome={runtime:{id:'fixture',getURL:p=>'chrome-extension://fixture/'+p,
         onMessage:{addListener:fn=>window.messages.push(fn)},
         sendMessage:async m=>{
@@ -16,7 +16,10 @@ with preview_server() as base, sync_playwright() as p:
           if(['NOTES','CHATS'].includes(m.type))return {ok:true,data:[]};
           return {ok:true,data:true};
         }},tabs:{query:async()=>[{id:tabNumber,url:window.tabUrl||'https://www.youtube.com/watch?v=video'+tabNumber}],onActivated:{addListener:()=>{}},onUpdated:{addListener:fn=>window.updated=fn}},
-        storage:{onChanged:{addListener:()=>{}}}};
+        storage:{onChanged:{addListener:()=>{}},local:{
+          get:async key=>({[key]:window.savedStorage[key]}),
+          set:async values=>{Object.assign(window.savedStorage,values)}
+        }}};
     ''')
     page.goto(base+'/extension/panel/index.html')
     page.wait_for_function('pending.length===1')

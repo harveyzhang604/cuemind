@@ -12,7 +12,7 @@ with preview_server() as base,sync_playwright() as p:
  moves=0;stays=0
  for i in range(151,166):
   row=page.locator('.sentence[data-id="s'+str(i)+'"]')
-  before=row.evaluate('(e)=>{const b=e.getBoundingClientRect(),top=document.querySelector(".tabs").getBoundingClientRect().bottom,bottom=document.querySelector("footer").getBoundingClientRect().top;return {visible:b.top>=top+4&&b.bottom<=bottom-Math.min(24,Math.max(8,(bottom-top)/10)),scroll:scrollY};}')
+  before=row.evaluate('(e)=>{const b=e.getBoundingClientRect(),top=document.querySelector(".tabs").getBoundingClientRect().bottom,bottom=document.querySelector("footer").getBoundingClientRect().top;return {visible:b.top>=top+4&&b.bottom<=bottom-Math.max(48,(bottom-top)*0.3),scroll:scrollY};}')
   replay_tick(i);page.wait_for_timeout(60)
   after=page.evaluate('scrollY')
   if before['visible']:
