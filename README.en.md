@@ -15,6 +15,7 @@ Bring your own model account and API key. Learning records stay on your device. 
 - **Notice the vocabulary you want to learn.** Three emphasis levels reflect your exam or professional goal. Add your own glossary and mark familiar expressions as mastered.
 - **Ask with the source in view.** Explain a selected word in context, or ask about a sentence, passage, or whole video. Follow citations back to the source.
 - **Keep your understanding.** Press `N` while watching to capture a note with its transcript and timestamp. Search, revisit, and export it later.
+- **Continue where you stopped.** Open study history beside the video title to find watched videos and saved audio. Choose a video to resume it with its learning materials.
 - **Reuse completed work.** Restore matching transcripts and AI results locally. Interrupted tasks retain completed batches and retry missing work.
 
 ![Bilingual reading, glossary emphasis and a three-sentence replay selection](docs/assets/readme-subtitles.png)
@@ -114,9 +115,15 @@ Text models, Supadata, and transcription use separate settings and keys. A video
 
 ### Migu sports videos
 
-On a playable Migu sports programme, select the English audio programme, click the CueMind toolbar icon, then **读取当前视频 → 从当前位置连续识别** (Read current video → Transcribe continuously from the playhead). When no readable subtitle track is available, CueMind transcribes audio as it plays: the first segment is about 30 seconds and later segments are about two minutes each. The side panel lists the planned ranges through the end of the video, the current range, and each range's transcription and translation status or error. With a text model configured, successful source segments are translated automatically and bilingual captions appear progressively in the panel and over the video. Completed captions and translations remain in local storage. Continuing skips contiguous completed audio without skipping failed gaps. Programmes are stored separately.
+On a playable Migu sports programme, select the English audio programme, click the CueMind toolbar icon, then **读取当前视频 → 从当前位置连续识别** (Read current video → Transcribe continuously from the playhead). When no readable subtitle track is available, CueMind transcribes audio as it plays: the first segment is about 10 seconds and later segments are about one minute each. The side panel lists the planned ranges through the end of the video, the current range, and each range's transcription and translation status or error. With a text model configured, successful source segments are translated automatically and bilingual captions appear progressively in the panel and over the video. Completed captions and translations remain in local storage. Continuing skips contiguous completed audio without skipping failed gaps. Programmes are stored separately.
 
 The player must play at 1× speed. Unplayed audio cannot be transcribed in advance. Pausing, seeking, changing speed, or switching videos ends the current capture while preserving completed segments. Failed ranges show their time and error so you can seek back and retry. If Migu blocks playback because of copyright or region restrictions, CueMind cannot obtain that audio. You can import an audio or subtitle file you already have instead.
+
+### Study history and local audio
+
+Click the **history icon beside the video title** in the side panel to open a separate study-history dialog. Search by title or platform; each video shows its last playback position, duration, and saved audio coverage. Choosing a title switches to its open browser tab when possible, otherwise opens its original URL, and resumes from the saved position. CueMind reloads that video's locally stored captions, translations, vocabulary analysis, Q&A, overview, and notes. Chrome owns the side panel's native title bar, so the extension places this icon in its own video-title row immediately below it.
+
+Expand **音频、链接与记录管理** (Audio, links, and record management) on an entry to open or copy its URL, save audio, listen to locally saved audio when the corresponding video is not open, or delete that video's learning record. Deletion asks for confirmation and removes its captions, translations, vocabulary analysis, Q&A, overview, notes, and local audio. CueMind attempts to save an independent audio track in the background for YouTube and Bilibili videos. If a manual audio-save request cannot download the track, it opens the video and captures playback from the beginning instead. Migu also requires playback capture: a three-hour programme may take about three hours, with the video playable and Chrome running throughout. Saving audio alone does not run ASR or translation. The dialog reports actual saved coverage; only captured portions can be heard offline. Platform download or playback restrictions may prevent a complete copy. Audio is stored in local IndexedDB and **is not included in subtitle JSON backups**.
 
 ## Features
 
@@ -142,7 +149,7 @@ Typing fields retain their normal input behavior. After manually scrolling away,
 
 With a text model configured, selecting bilingual or translated mode in the panel or video overlay automatically fills missing translations for the whole video, prioritizing the playback area. Each finished batch appears and is saved locally.
 
-Open **重点** (Focus) to select CET-4, CET-6, IELTS, TOEFL, medicine, finance, computing, or a custom goal. Click **分析重点词** (Analyze focus words) to generate three emphasis levels. Results are saved separately per goal and restored when you switch back.
+Open **重点** (Focus) to select CET-4, CET-6, IELTS, TOEFL, medicine, finance, computing, or a custom goal. Named custom goals become selectable options; **管理目标选项** (Manage goal options) can hide unwanted ones, while **自定义** (Custom) stays at the end of the list for creating another goal. Click **分析重点词** (Analyze focus words) to generate three emphasis levels. Results are saved separately per goal and restored when you switch back.
 
 Adjust the sidebar, video-original, and video-translation font sizes independently. Manual glossary entries and mastered words apply immediately without a model request. AI emphasis reflects context and your goal; it is not an official exam vocabulary list.
 
@@ -208,7 +215,7 @@ Unpacked extensions do not update automatically. Keep the original folder and av
 
 **What should I check after an API error?** Verify the provider, endpoint, model, key, account balance, and Chrome domain permission. Service keys are not interchangeable. Retry later after rate limiting. See [Troubleshooting](docs/TROUBLESHOOTING.md), and never post a real key when reporting a problem.
 
-**How can I free storage?** Settings show local usage and provide separate actions to clear analysis caches, delete notes, or reset all extension data. Back up first. A full reset also removes settings and keys; data does not expire automatically.
+**How can I free storage?** Settings show local usage and provide separate actions to clear analysis caches, delete notes, or reset all extension data. Manage individual videos and their local audio through the history icon beside the video title. Back up first. A full reset also removes settings and keys; data does not expire automatically.
 
 ## Supported environments
 
