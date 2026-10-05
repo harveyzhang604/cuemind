@@ -395,7 +395,9 @@ async function load(refresh = false, trackId) {
     await syncTaskState();
     await restoreReading(gen);
     if (!backgroundBusy)
-      status(data.needASR ? data.warning || '没有找到可用字幕，可以导入字幕或生成 ASR 字幕。' : '');
+      status(
+        data.warning || (data.needASR ? '没有找到可用字幕，可以导入字幕或生成 ASR 字幕。' : ''),
+      );
     if (['youtube', 'bilibili'].includes(record.videoInfo.platform))
       rpc('SAVE_VIDEO_AUDIO', { recordId: record.id, tabId: tab.id }).catch(() => {});
     await bindPlayer();
@@ -3089,6 +3091,8 @@ if (ext) {
       load();
     if (m.event === 'note-saved' && (m.recordId === record?.id || $('#note-scope').value === 'all'))
       hydrate().catch(error);
+    if (m.event === 'audio-fallback' && m.videoKey === record?.videoKey)
+      toast('后台音轨不可用，正在自动播放保存完整音频；完成后恢复原播放位置。');
     if (
       ['audio-saved', 'audio-save-failed', 'audio-progress', 'history-deleted'].includes(m.event) &&
       $('#local-audio-library').open
@@ -4332,7 +4336,7 @@ async function refreshAudioLibrary() {
         el(
           'p',
           'hint',
-          `${entry.audioStatus.method === 'playback' ? '正在实时播放并采集' : '正在后台下载'}音频 · ${entry.audioStatus.seconds != null ? `${formatTime(entry.audioStatus.seconds)} / ${formatTime(entry.audioStatus.totalSeconds || entry.duration)} · ` : ''}${(entry.audioStatus.bytes / 1048576).toFixed(1)} MB${entry.audioStatus.total ? ` / ${(entry.audioStatus.total / 1048576).toFixed(1)} MB` : ''}`,
+          `${entry.audioStatus.method === 'queued' ? '等待采集' : entry.audioStatus.method === 'playback' ? '正在实时播放并采集' : '正在后台下载'}音频 · ${entry.audioStatus.seconds != null ? `${formatTime(entry.audioStatus.seconds)} / ${formatTime(entry.audioStatus.totalSeconds || entry.duration)} · ` : ''}${(entry.audioStatus.bytes / 1048576).toFixed(1)} MB${entry.audioStatus.total ? ` / ${(entry.audioStatus.total / 1048576).toFixed(1)} MB` : ''}`,
         ),
       );
       management.append(

@@ -12,6 +12,7 @@ const tests = [
   'bilibili_follow',
   'migu_clock',
   'replay_keyboard',
+  'player_platform',
 ];
 for (const name of tests) {
   console.log(`Browser regression: ${name}`);

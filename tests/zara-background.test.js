@@ -49,7 +49,7 @@ test('learning history keeps video links and independently downloaded audio',asy
 });
 test('Bilibili English audio never reuses a cached Chinese translation as the original',async()=>{
  const f=await fixture();
- f.inspection.info={platform:'bilibili',videoId:'BVfixture',page:1,title:'【Easy English】英语口语练习',duration:60,audioLanguage:'',url:'https://www.bilibili.com/video/BVfixture/?p=1'};
+ f.inspection.info={platform:'bilibili',videoId:'BVfixture',page:1,title:'【Easy English】英语口语练习',duration:60,audioLanguage:'en',url:'https://www.bilibili.com/video/BVfixture/?p=1'};
  f.inspection.tracks=[{id:'zh-track',language:'ai-zh',label:'中文',isAi:true}];
  const key=videoKey(f.inspection.info),old={id:key+':zh-track',videoKey:key,videoInfo:f.inspection.info,rawCaptions:[{id:'old',start:0,end:3,text:'你好'}],transcriptMeta:{source:'bilibili_native',trackId:'zh-track',language:'ai-zh'},schemaVersion:SCHEMA_VERSION,updatedAt:1};
  f.stores.videos.set(old.id,old);f.storage['lastRecord:'+key]=old.id;
@@ -57,8 +57,53 @@ test('Bilibili English audio never reuses a cached Chinese translation as the or
  assert.equal(result.needASR,true);
  assert.equal(result.record.transcriptMeta.source,'bilibili_audio');
  assert.equal(result.record.sentences.length,0);
- assert.match(result.warning,/中文字幕/);
+ assert.match(result.warning,/原声音频语言不一致/);
  assert.equal(f.stores.videos.get(old.id).rawCaptions.length,1);
+});
+test('unknown Bilibili audio does not discard saved Chinese narration based on its English lesson title',async()=>{
+ const f=await fixture();
+ f.inspection.info={platform:'bilibili',videoId:'BVfixture',page:1,title:'英语口语：中文讲解',duration:60,audioLanguage:'',url:'https://www.bilibili.com/video/BVfixture/?p=1'};
+ f.inspection.tracks=[{id:'zh-track',language:'ai-zh',label:'中文',isAi:true}];
+ const key=videoKey(f.inspection.info),old={id:key+':zh-track',videoKey:key,videoInfo:f.inspection.info,rawCaptions:[{id:'old',start:0,end:3,text:'今天讲英语口语。'}],sentences:[],transcriptMeta:{source:'bilibili_native',trackId:'zh-track',language:'ai-zh'},schemaVersion:SCHEMA_VERSION,updatedAt:1};
+ f.stores.videos.set(old.id,old);f.storage['lastRecord:'+key]=old.id;
+ const result=await f.route({type:'LOAD',tabId:1,trackId:'auto',videoKey:key});
+ assert.equal(result.cached,true);
+ assert.equal(result.record.id,old.id);
+ assert.equal(result.record.rawCaptions[0].text,'今天讲英语口语。');
+ assert.match(result.warning,/未提供原声语言/);
+});
+test('automatic audio save refreshes an expired CDN URL before using playback',async()=>{
+ const f=await fixture();f.context.fetchSupadata=async()=>({raw:[],language:'en'});
+ const {record}=await f.route({type:'LOAD',tabId:1});
+ let inspections=0,fetches=0;
+ f.context.chrome.scripting.executeScript=async()=>[{result:[{url:`https://rr1.googlevideo.com/videoplayback?generation=${++inspections}`,mimeType:'audio/mp4',bytes:4}]}];
+ f.context.fetch=async url=> ++fetches===1 ? {ok:false,status:403,url} : {ok:true,status:200,url,headers:{get:()=> '4'},body:new ReadableStream({start(c){c.enqueue(new Uint8Array([1,2,3,4]));c.close();}})};
+ await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1});
+ for(let i=0;i<40&&!f.stores.audio.size;i++)await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(inspections,2);assert.equal(fetches,2);
+ assert.equal((await f.route({type:'AUDIO_LIBRARY'}))[0].audioStatus.state,'saved');
+ assert.equal(await f.route({type:'CAPTURE_STATUS'}),null);
+});
+test('automatic Bilibili fallback saves full audio and restores the original player without changing captions',async()=>{
+ const f=await fixture();
+ f.inspection.info={platform:'bilibili',videoId:'BVfixture',page:1,title:'Fixture',duration:30,audioLanguage:'en',url:'https://www.bilibili.com/video/BVfixture/?p=1'};
+ const {record}=await f.route({type:'LOAD',tabId:1});
+ const before=structuredClone(f.stores.videos.get(record.id));
+ const url='https://a.hdslb.com/audio.m4s';
+ f.context.chrome.scripting.executeScript=async()=>[{result:[{url,mimeType:'audio/mp4',bytes:4}]}];
+ f.context.fetch=async()=>({ok:false,status:403,url});
+ const commands=[],state={time:7,duration:30,paused:true,rate:1.5,readyState:4,seeking:false,isAd:false,videoKey:record.videoKey};
+ f.context.chrome.tabs.sendMessage=async(_id,m)=>{commands.push(m);if(m.action==='seek')state.time=m.time;if(m.action==='play')state.paused=false;if(m.action==='pause')state.paused=true;if(m.action==='rate')state.rate=m.rate;return {ok:true,data:structuredClone(state)};};
+ f.context.chrome.offscreen={hasDocument:async()=>true};f.context.chrome.tabCapture={getMediaStreamId:async()=> 'stream'};f.context.chrome.runtime.sendMessage=async()=>({ok:true});
+ await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1});
+ for(let i=0;i<40&&!commands.some(x=>x.action==='play');i++)await new Promise(resolve=>setImmediate(resolve));
+ assert.ok(commands.some(x=>x.action==='seek'&&x.time===0));
+ await f.context.saveAudio({videoKey:record.videoKey,recordId:record.id,segmentId:'full',start:0,end:30,blob:new Blob([new Uint8Array(1500)],{type:'audio/webm'})});
+ const send=message=>new Promise(resolve=>f.listeners[0](message,{id:'fixture',url:'chrome-extension://fixture/offscreen/index.html'},resolve));
+ assert.equal((await send({type:'ASR_FINISHED',recordId:record.id})).ok,true);
+ assert.equal(state.time,7);assert.equal(state.paused,true);assert.equal(state.rate,1.5);
+ assert.equal((await f.route({type:'AUDIO_LIBRARY'}))[0].audioStatus.state,'saved');
+ assert.deepEqual(f.stores.videos.get(record.id),before);
 });
 test('unavailable direct audio leaves history intact and can be retried',async()=>{
  const f=await fixture();f.context.fetchSupadata=async()=>({raw:[],language:'en'});
@@ -119,7 +164,7 @@ test('Migu full-audio capture starts at zero and never writes fake ASR results',
  assert.equal(history[0].audioStatus.state,'saved');
  assert.equal(f.stores.videos.get(record.id).transcriptMeta.asrSegments?.length||0,0);
 });
-test('manual YouTube save falls back to playback capture when a direct audio URL is denied',async()=>{
+test('automatic YouTube save falls back to playback capture when a direct audio URL is denied',async()=>{
  const f=await fixture();f.context.fetchSupadata=async()=>({raw:[],language:'en'});
  const {record}=await f.route({type:'LOAD',tabId:1});
  const mediaUrl='https://rr1.googlevideo.com/videoplayback?id=fixture';
@@ -130,7 +175,7 @@ test('manual YouTube save falls back to playback capture when a direct audio URL
  f.context.chrome.offscreen={hasDocument:async()=>true};
  f.context.chrome.tabCapture={getMediaStreamId:async()=> 'stream'};
  f.context.chrome.runtime.sendMessage=async()=>({ok:true});
- assert.equal((await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1,retry:true})).state,'saving');
+ assert.equal((await f.route({type:'SAVE_VIDEO_AUDIO',recordId:record.id,tabId:1})).state,'saving');
  for(let i=0;i<40&&!commands.some(x=>x.action==='play');i++)await new Promise(resolve=>setImmediate(resolve));
  assert.ok(commands.some(x=>x.action==='seek'&&x.time===0));
  assert.equal((await f.route({type:'AUDIO_LIBRARY'}))[0].audioStatus.method,'playback');

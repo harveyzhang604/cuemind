@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {inspectPage,inspectAudioSource,canReuseTranscript,inferredSpokenLanguage,mismatchedOriginalTrack} from '../extension/services/platform.js';
 
-test('Chinese captions on an explicitly English Bilibili lesson are not English originals',()=>{
- const info={platform:'bilibili',title:'【Easy English】日常英语口语练习',audioLanguage:''};
+test('Chinese captions mismatch confirmed English audio, but a lesson title cannot establish its language',()=>{
+ const info={platform:'bilibili',title:'【Easy English】日常英语口语练习',audioLanguage:'en'};
  assert.equal(inferredSpokenLanguage(info),'en');
  assert.equal(mismatchedOriginalTrack(info,{language:'ai-zh'}),true);
  assert.equal(mismatchedOriginalTrack(info,{language:'en'}),false);
  assert.equal(mismatchedOriginalTrack({...info,title:'中文配音的英语课',audioLanguage:'zh'},{language:'zh'}),false);
  assert.equal(mismatchedOriginalTrack({...info,title:'普通视频',audioLanguage:''},{language:'zh'}),false);
+ for(const title of ['英语口语入门：中文讲解','English conversation explained in Chinese','【Easy English】日常英语口语练习']){
+  assert.equal(inferredSpokenLanguage({...info,title,audioLanguage:''}),'');
+  assert.equal(mismatchedOriginalTrack({...info,title,audioLanguage:''},{language:'ai-zh'}),false);
+ }
 });
 test('Bilibili inspection works when Chrome injects the function without module imports',async()=>{
  const location=new URL('https://www.bilibili.com/video/BVfixture/?p=1');

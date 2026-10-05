@@ -34,6 +34,7 @@ import { captureClockProblem, planAsrSegments, skipRecognizedAudio } from './cor
 import { checkSpeechNetwork, speechSettings } from './services/speech.js';
 const tasks = new Map();
 const audioDownloads = new Map();
+let audioPlaybackQueue = Promise.resolve();
 let capture = null,
   restoring = false;
 setInterval(() => {
@@ -384,6 +385,9 @@ async function captureFullAudio(record, tabId, controller) {
       tabId,
       audioOnly: true,
       originallyPaused: state.paused,
+      ...(['youtube', 'bilibili'].includes(record.videoInfo.platform)
+        ? { restoreTime: state.time }
+        : {}),
     });
   } catch (error) {
     await player(tabId, { action: 'seek', time: state.time, videoKey: record.videoKey }).catch(
@@ -418,7 +422,12 @@ async function startVideoAudioDownload(recordId, tabId, retry = false) {
     audioDownloads.set(key, { state: 'saved' });
     return { state: 'saved' };
   }
-  if (existing?.state === 'failed' && !retry) return existing;
+  if (
+    existing?.state === 'failed' &&
+    !retry &&
+    (info.platform === 'migu' || Date.now() - existing.failedAt < 60000)
+  )
+    return existing;
   const controller = new AbortController();
   audioDownloads.set(key, { state: 'saving', bytes: 0 });
   const taskId = `audio:${key}`;
@@ -438,12 +447,49 @@ async function startVideoAudioDownload(recordId, tabId, retry = false) {
       try {
         await downloadVideoAudio(record, target.id, controller);
       } catch (error) {
-        if (!retry || controller.signal.aborted || /视频已切换/.test(error.message)) throw error;
+        if (controller.signal.aborted || /视频已切换/.test(error.message)) throw error;
+        // Signed CDN URLs can expire. Reinspect the current player once before
+        // falling back to real-time capture, including for automatic saves.
+        try {
+          await downloadVideoAudio(record, target.id, controller);
+          return;
+        } catch (retryError) {
+          if (controller.signal.aborted || /视频已切换/.test(retryError.message)) throw retryError;
+        }
         // Some player URLs require a signature or deny extension fetches. Use
-        // the real player as the final fallback; this takes playback time.
-        await chrome.tabs.update(target.id, { active: true });
-        audioDownloads.set(key, { state: 'saving', bytes: 0, fallback: true });
-        await captureFullAudio(record, target.id, controller);
+        // the real player as the final fallback; serialize captures so saves
+        // for several videos don't fail against the single offscreen recorder.
+        const previous = audioPlaybackQueue;
+        let release;
+        const turn = new Promise((resolve) => (release = resolve));
+        audioPlaybackQueue = previous.then(() => turn);
+        audioDownloads.set(key, { state: 'saving', bytes: 0, method: 'queued' });
+        notify({ event: 'audio-progress', videoKey: key });
+        try {
+          await new Promise((resolve, reject) => {
+            const aborted = () => {
+              controller.signal.removeEventListener('abort', aborted);
+              reject(new DOMException('已取消', 'AbortError'));
+            };
+            controller.signal.addEventListener('abort', aborted, { once: true });
+            if (controller.signal.aborted) aborted();
+            previous.then(() => {
+              controller.signal.removeEventListener('abort', aborted);
+              if (controller.signal.aborted) aborted();
+              else resolve();
+            });
+          });
+          while (capture && !controller.signal.aborted)
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
+          await chrome.tabs.update(target.id, { active: true });
+          notify({ event: 'audio-fallback', videoKey: key });
+          await captureFullAudio(record, target.id, controller);
+          while (capture?.audioOnly && capture.videoKey === key)
+            await new Promise((resolve) => setTimeout(resolve, 250));
+        } finally {
+          release();
+        }
       }
     } finally {
       if (target.created && (!capture?.audioOnly || capture.videoKey !== key))
@@ -455,7 +501,7 @@ async function startVideoAudioDownload(recordId, tabId, retry = false) {
         key,
         controller.signal.aborted
           ? { state: 'paused', error: '已取消' }
-          : { state: 'failed', error: error.message },
+          : { state: 'failed', error: error.message, failedAt: Date.now() },
       );
       notify({ event: 'audio-save-failed', videoKey: key });
     })
@@ -810,7 +856,15 @@ async function loadTranscript(m, signal) {
     (!m.trackId || m.trackId === 'auto') && mismatchedOriginalTrack(data.info, autoTrack);
   if (translatedTrackOnly)
     data.warning =
-      'B站目前只提供与视频英语原声不一致的中文字幕。它不能当作英文原文；请从视频开头播放并点击“从当前位置连续识别”，使用语音服务生成英文原文。也可在字幕设置中手动选用中文字幕。';
+      '当前字幕语言与平台提供的原声音频语言不一致。请使用音频识别生成原文，或在字幕设置中手动选择轨道。';
+  else if (
+    data.info.platform === 'bilibili' &&
+    !data.info.audioLanguage &&
+    autoTrack &&
+    (!m.trackId || m.trackId === 'auto')
+  )
+    data.warning =
+      'B站未提供原声语言，当前展示平台字幕，尚未确认是否为原文。若与播放语言不同，请选择原文轨道或识别音频。';
   const useSupadata =
     data.info.platform === 'youtube' &&
     (m.trackId === 'supadata' ||
@@ -854,7 +908,12 @@ async function loadTranscript(m, signal) {
         duration: data.info.duration > 0 ? data.info.duration : saved.videoInfo.duration,
       };
       await store(saved);
-      return { record: saved, tracks: data.tracks, cached: true };
+      return {
+        record: saved,
+        tracks: data.tracks,
+        cached: true,
+        warning: savedIsOriginalChoice ? undefined : data.warning,
+      };
     }
   }
   const track = translatedTrackOnly
@@ -871,7 +930,7 @@ async function loadTranscript(m, signal) {
       await store(cached);
     }
     await remember(cached);
-    return { record: cached, tracks: data.tracks, cached: true };
+    return { record: cached, tracks: data.tracks, cached: true, warning: data.warning };
   }
   if (!useSupadata && track && data.info.platform === 'youtube')
     data = await page(m.tabId, track.id, key);
@@ -1606,6 +1665,13 @@ async function route(m) {
       }
       session.previousRate = state.rate;
       session.wasPaused = session.audioOnly ? m.originallyPaused === true : state.paused;
+      if (
+        session.audioOnly &&
+        ['youtube', 'bilibili'].includes(original.videoInfo.platform) &&
+        Number.isFinite(m.restoreTime) &&
+        m.restoreTime >= 0
+      )
+        session.restoreTime = Math.min(m.restoreTime, state.duration);
       session.videoKey = original.videoKey;
       session.startTime = state.time;
       session.translationSignature = translationSignature(cfg, {
@@ -1755,16 +1821,23 @@ async function route(m) {
 }
 async function releaseCapture(s, restorePlaying = false) {
   if (!s?.videoKey) return;
+  if (Number.isFinite(s.restoreTime)) s.stopping = true;
   clearTimeout(s.timer);
   await player(s.tabId, { action: 'capture-lock', locked: false, videoKey: s.videoKey }).catch(
     () => {},
   );
+  if (Number.isFinite(s.restoreTime)) {
+    await player(s.tabId, { action: 'pause', videoKey: s.videoKey }).catch(() => {});
+    await player(s.tabId, { action: 'seek', time: s.restoreTime, videoKey: s.videoKey }).catch(
+      () => {},
+    );
+  }
   await player(s.tabId, { action: 'rate', rate: s.previousRate, videoKey: s.videoKey }).catch(
     () => {},
   );
   if (s.audioOnly && s.wasPaused)
     await player(s.tabId, { action: 'pause', videoKey: s.videoKey }).catch(() => {});
-  if (restorePlaying && !s.wasPaused)
+  if ((restorePlaying || Number.isFinite(s.restoreTime)) && !s.wasPaused)
     await player(s.tabId, { action: 'play', videoKey: s.videoKey }).catch(() => {});
 }
 async function stopCapture(options = {}) {

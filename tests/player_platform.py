@@ -1,6 +1,6 @@
 from playwright.sync_api import sync_playwright
 from pathlib import Path
-import tempfile,json,base64,io,wave
+import tempfile,json,base64,io,wave,time
 from browser_support import chromium_options
 ROOT=Path(__file__).resolve().parents[1]
 CHROME=Path.home()/'Library/Caches/ms-playwright/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
@@ -24,9 +24,20 @@ with sync_playwright() as p:
    else:route.fulfill(body=html,content_type='text/html')
   ctx.route('https://www.youtube.com/**',youtube)
   page.goto('https://www.youtube.com/watch?v=fixture');page.wait_for_function('document.querySelector("video").readyState >= 2')
-  panel=ctx.new_page();panel.goto(f'chrome-extension://{eid}/panel/index.html');panel.wait_for_load_state('networkidle')
+  # Use an extension page without automatic transcript/audio loading; this test
+  # drives RPCs explicitly so background saves cannot interfere with playback.
+  panel=ctx.new_page();panel.goto(f'chrome-extension://{eid}/panel/settings.html');panel.wait_for_load_state('networkidle')
   tid=worker.evaluate('async()=> (await chrome.tabs.query({url:"https://www.youtube.com/*"}))[0].id')
   def rpc(kind,**data):return panel.evaluate('(m)=>chrome.runtime.sendMessage(m)',{'type':kind,**data})
+  # wait_for_function treats a promise as truthy in its browser poller. Await
+  # each extension response in Python before deciding whether the work finished.
+  def wait_rpc(kind,predicate,timeout=15,**data):
+   deadline=time.monotonic()+timeout
+   while time.monotonic()<deadline:
+    result=rpc(kind,**data)
+    if predicate(result):return result['data']
+    panel.wait_for_timeout(100)
+   raise AssertionError(f'{kind} did not finish: {result}')
   empty=rpc('LOAD',tabId=tid,trackId='auto');assert empty['ok'] and empty['data']['needASR'],empty
   caption_state['empty']=False
   loaded=rpc('LOAD',tabId=tid,trackId='auto');assert loaded['ok'],loaded
@@ -146,8 +157,8 @@ with sync_playwright() as p:
   assert not rpc('PLAYER_COMMAND',tabId=tid,command={'action':'seek','time':6})['ok']
   page.wait_for_timeout(1400)
   assert rpc('CAPTURE_STOP')['ok']
-  panel.wait_for_function('async()=>{const r=await chrome.runtime.sendMessage({type:"GET_RECORD",recordId:window.fixtureCaptureId});return r.ok&&r.data?.rawCaptions?.length===1}',timeout=15000)
-  panel.wait_for_function('async()=>{const r=await chrome.runtime.sendMessage({type:"CAPTURE_STATUS"});return r.ok&&r.data===null}',timeout=15000)
+  wait_rpc('GET_RECORD',lambda r:r.get('ok') and len(r['data'].get('rawCaptions',[]))==1,recordId=capture_id)
+  wait_rpc('CAPTURE_STATUS',lambda r:r.get('ok') and r['data'] is None)
   captured=rpc('GET_RECORD',recordId=capture_id)['data']
   assert len(captured['rawCaptions'])==1,captured
   assert 2<=captured['rawCaptions'][0]['start']<2.5,captured
@@ -163,13 +174,59 @@ with sync_playwright() as p:
   assert not ad['ok'] and '广告' in ad['error'],ad
   page.evaluate('document.querySelector("#movie_player").remove()')
   # Disposed content scripts must not reattach tools or duplicate shortcuts.
-  page.evaluate('document.body.insertAdjacentHTML("beforeend",\'<div id="movie_player"></div>\')')
+  page.evaluate('''()=>{const host=document.createElement('div');host.id='movie_player';const video=document.querySelector('video');video.before(host);host.append(video);}''')
   worker.evaluate('async tabId=>await chrome.scripting.executeScript({target:{tabId},func:()=>window.__cueMindCleanup()})',tid)
   page.wait_for_timeout(1200)
   assert page.locator('#cuemind-tools').count()==0
   for _ in range(2):worker.evaluate('async tabId=>await chrome.scripting.executeScript({target:{tabId},files:["content/player.js"]})',tid)
   page.wait_for_timeout(1200)
   assert page.locator('#cuemind-tools').count()==1
+  # Exercise complete automatic fallback for both platforms, using actual
+  # MediaRecorder blobs and IndexedDB. CDN 403s and provider results are fixtures.
+  worker.evaluate('''()=>{const original=globalThis.fetch;globalThis.fetch=async(url,options)=>{
+   const target=String(url);
+   if(target.includes('googlevideo.com')||target.endsWith('/audio.m4s'))return new Response('',{status:403});
+   if(target.endsWith('/audio/transcriptions'))return new Response(JSON.stringify({segments:[{start:3,end:4,text:'Audio learning works.'}]}));
+   return original(url,options);
+  };}''')
+  page.evaluate('''()=>{ytInitialPlayerResponse.streamingData={adaptiveFormats:[{url:'https://rr1.googlevideo.com/videoplayback?id=fixture',mimeType:'audio/mp4',contentLength:'1000'}]};}''')
+  def bili_api(route):
+   if '/view?' in route.request.url:route.fulfill(json={'code':0,'data':{'pages':[{'cid':1}]}})
+   else:route.fulfill(json={'code':0,'data':{'dash':{'audio':[{'baseUrl':'https://a.hdslb.com/audio.m4s','mimeType':'audio/mp4'}]}}})
+  ctx.route('https://api.bilibili.com/**',bili_api)
+  ctx.route('https://www.bilibili.com/**',lambda route:route.fulfill(body=f'<html><body><div class="bpx-player-container"><video controls src="data:audio/wav;base64,{audio}"></video></div></body></html>',content_type='text/html'))
+  bili=ctx.new_page();bili.goto('https://www.bilibili.com/video/BVfixture/?p=1');bili.wait_for_function('document.querySelector("video").readyState>=2')
+  bili_id=worker.evaluate('async()=> (await chrome.tabs.query({url:"https://www.bilibili.com/*"}))[0].id')
+  for platform,media,media_id,url in [('youtube',page,tid,'https://www.youtube.com/watch?v=fixture'),('bilibili',bili,bili_id,'https://www.bilibili.com/video/BVfixture/?p=1')]:
+   imported=rpc('IMPORT',info={'platform':platform,'videoId':'fixture' if platform=='youtube' else 'BVfixture','page':1,'title':'Full audio fixture','duration':12,'url':url},raw=[{'start':0,'end':1,'text':'Original caption.'}])['data']
+   key=imported['videoKey']
+   for command_data in [{'action':'seek','time':4},{'action':'rate','rate':1.25},{'action':'pause'}]:
+    assert rpc('PLAYER_COMMAND',tabId=media_id,command={**command_data,'videoKey':key})['ok']
+   media.wait_for_function('!document.querySelector("video").seeking')
+   assert rpc('SAVE_VIDEO_AUDIO',recordId=imported['id'],tabId=media_id)['ok']
+   history=wait_rpc('AUDIO_LIBRARY',lambda r:r.get('ok') and any(x['videoKey']==key and x.get('audioStatus',{}).get('state')=='saved' for x in r['data']),timeout=25)
+   wait_rpc('CAPTURE_STATUS',lambda r:r.get('ok') and r['data'] is None)
+   item=next(x for x in history if x['videoKey']==key)
+   assert min(c['start'] for c in item['clips'])<.5 and max(c['end'] for c in item['clips'])>=11,item
+   playback=rpc('PLAYER_COMMAND',tabId=media_id,command={'action':'state','videoKey':key})['data']
+   assert abs(playback['time']-4)<.1 and playback['paused'] and playback['rate']==1.25,playback
+   unchanged=rpc('GET_RECORD',recordId=imported['id'])['data']
+   assert unchanged['rawCaptions']==imported['rawCaptions'],unchanged
+   # Decode and play the persisted audio with the original media page closed.
+   media.close()
+   clips=item['clips']
+   offline=panel.evaluate('''async ({clips,key})=>{const {LocalAudioPlayer}=await import('./local-audio.js');window.offlineErrors=[];window.offlinePlayer=new LocalAudioPlayer(()=>{},e=>offlineErrors.push(e.message));offlinePlayer.setClips(clips,key);await offlinePlayer.command({action:'seek',time:1});await offlinePlayer.command({action:'play'});return offlinePlayer.snapshot();}''',{'clips':clips,'key':key})
+   assert not offline['paused'] and not panel.evaluate('offlineErrors'),offline
+   panel.evaluate('offlinePlayer.dispose()')
+   # Reuse the saved blob for ASR twice: no new playback or duplicate captions.
+   first=clips[0]
+   data_url=panel.evaluate('''async id=>{const {getAudio}=await import('../storage/audio.js');const clip=await getAudio(id);return await new Promise(resolve=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.readAsDataURL(clip.blob);});}''',first['id'])
+   recognized=rpc('RETRY_SAVED_AUDIO',recordId=imported['id'],clipId=first['id'],dataUrl=data_url)
+   assert recognized['ok'],recognized
+   assert any(s['rawText']=='Audio learning works.' for s in recognized['data']['sentences']),recognized
+   repeated=rpc('RETRY_SAVED_AUDIO',recordId=imported['id'],clipId=first['id'],dataUrl=data_url)
+   assert repeated['ok'] and len(repeated['data']['sentences'])==len(recognized['data']['sentences']),repeated
+   print(f'{platform}: complete automatic audio fallback, restored position, offline playback and repeat-safe ASR passed.')
   recorder.evaluate('()=>window.fixtureAudio.close()');recorder.close()
   print('Player/platform fixture passed: native captions, time ranges, 3x loop, session replacement, wrong-video rejection, keyboard and stop.')
   ctx.close()
