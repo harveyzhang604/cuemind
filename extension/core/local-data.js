@@ -12,6 +12,7 @@ export function clearLearningCache(record) {
     'boundaryChunks',
     'interfaceTranslations',
     'translationCaches',
+    'videoMaterials',
   ])
     delete next[key];
   next.sentences = next.sentences.map((s) => {

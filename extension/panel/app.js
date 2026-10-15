@@ -17,6 +17,7 @@ import { demoRecord } from './demo.js';
 import { prepareSpeechAudio, speechSettings } from '../services/speech.js';
 import { keyFromUrl, matchesVideoUrl } from '../core/video.js';
 import { buildAsrTimeline, visibleAsrTimeline } from '../core/asr-progress.js';
+import { createMaterialsUI } from './materials-ui.js';
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const ext = !!globalThis.chrome?.runtime?.id;
@@ -2409,11 +2410,22 @@ $('#append-note').onclick = () => {
   $('#refine-preview').hidden = true;
 };
 $('#cancel-refine').onclick = () => ($('#refine-preview').hidden = true);
+const materialsUI = createMaterialsUI({
+  getContext: () => ({ record, tabId, localAudioMode }),
+  rpc,
+  error,
+  ext,
+});
 $('#export').onclick = () => $('#export-dialog').showModal();
 $$('[data-export]').forEach(
   (b) =>
     (b.onclick = guard(async () => {
       const type = b.dataset.export;
+      if (type === 'materials') {
+        $('#export-dialog').close();
+        await materialsUI.open();
+        return;
+      }
       if (type === 'json') {
         const data = await rpc('BACKUP');
         download(JSON.stringify(data, null, 2), 'json', 'application/json');

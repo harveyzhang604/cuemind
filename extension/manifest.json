@@ -1,10 +1,18 @@
 {
   "manifest_version": 3,
   "name": "CueMind · 视频精读与复听",
-  "version": "1.0.54",
+  "version": "1.0.59",
   "description": "YouTube、Bilibili 与咪咕视频字幕学习：双语阅读、精准复听、AI 学习地图和本地笔记。",
   "minimum_chrome_version": "116",
-  "permissions": ["sidePanel", "storage", "activeTab", "scripting", "offscreen", "tabCapture"],
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "activeTab",
+    "scripting",
+    "offscreen",
+    "tabCapture",
+    "declarativeNetRequestWithHostAccess"
+  ],
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://www.bilibili.com/*",
@@ -16,7 +24,11 @@
     "https://www.miguvideo.com/*",
     "https://miguvideo.com/*"
   ],
-  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -46,7 +58,9 @@
         "https://www.miguvideo.com/*",
         "https://miguvideo.com/*"
       ],
-      "js": ["content/player.js"],
+      "js": [
+        "content/player.js"
+      ],
       "run_at": "document_idle"
     }
   ],

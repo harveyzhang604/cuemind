@@ -391,8 +391,63 @@
         ><button data-export="outline">层级大纲<small>Markdown / XMind 导入</small></button
         ><button data-export="srt">SRT 字幕<small>带真实时间戳的完整句</small></button
         ><button data-export="txt">纯文本 TXT<small>当前显示模式</small></button
-        ><button data-export="json">完整 JSON 备份<small>学习资料，不包含 API Key</small></button>
+        ><button data-export="json">完整 JSON 备份<small>学习资料，不包含 API Key</small></button
+        ><button data-export="materials">
+          视频代码与课件<small>自动检测换页、代码滚动和修改 · DeepSeek Flash</small>
+        </button>
       </div>
+    </dialog>
+    <dialog id="materials-dialog" aria-labelledby="materials-title">
+      <form method="dialog"><button class="close" aria-label="关闭代码与课件提取">×</button></form>
+      <h2 id="materials-title">视频代码与课件</h2>
+      <p id="materials-video-title" class="hint"></p>
+      <p id="materials-model" class="hint"></p>
+      <p class="hint">
+        自动检测 PPT
+        换页、代码滚动和修改，画面稳定后提取，并对重复内容去重。全片使用独立后台解码快速分析，不播放或跳动前台视频；截图保存与模型识别并行处理。
+      </p>
+      <label
+        >提取范围<select id="materials-mode">
+          <option value="beginning">从开头到结尾</option>
+          <option value="all">从上次中断处继续（首次从开头）</option>
+          <option value="remaining">从当前播放位置到结尾</option>
+          <option value="current">仅当前画面</option>
+        </select></label
+      >
+      <p class="hint">
+        开始后会把检测到的视频画面发送给
+        DeepSeek，可能产生模型费用。开始时需打开对应视频以获取地址；后台视频加载后可切换页面。只转录可见内容，模糊或遮挡处会标注；不会还原未展示的代码，也不会生成原始
+        PPT 文件。
+      </p>
+      <div class="row">
+        <button id="materials-start" class="primary">开始后台提取</button>
+        <button id="materials-stop" class="button" hidden>停止提取</button>
+        <button id="materials-settings" class="text-btn">模型设置</button>
+      </div>
+      <label class="hint materials-toggle"
+        ><input id="materials-auto-export" type="checkbox" checked />完成后自动下载课件、代码与截图
+        ZIP</label
+      >
+      <p id="materials-status" role="status" aria-live="polite"></p>
+      <p id="materials-count" class="hint"></p>
+      <p id="materials-frame-stats" class="hint"></p>
+      <label class="hint materials-toggle"
+        ><input id="materials-all-images" type="checkbox" />显示并导出全部原始截图（含重复）</label
+      >
+      <div class="row">
+        <button id="materials-zip" class="primary" disabled>打包导出课件、代码与截图</button>
+        <button id="materials-save" class="button" disabled>仅导出文字 Markdown</button>
+        <button id="materials-code" class="button" disabled>仅导出代码</button>
+        <button id="materials-json" class="text-btn" disabled>导出结构化 JSON</button>
+      </div>
+      <details id="materials-images">
+        <summary id="materials-images-count">已保存截图（0）</summary>
+        <div id="materials-image-list"></div>
+      </details>
+      <p id="materials-missing-images" class="hint" hidden>
+        旧版本或仅文字备份中的结果不含截图，请重新提取以补齐原始画面。
+      </p>
+      <div id="materials-results"></div>
     </dialog>
     <dialog id="subtitle-settings-dialog" aria-labelledby="subtitle-settings-title">
       <form method="dialog"><button class="close" aria-label="关闭字幕设置">×</button></form>

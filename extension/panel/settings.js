@@ -470,6 +470,7 @@ $('#storage-usage').onclick = async () => {
       chats: '问答',
       aiCache: '模型响应缓存',
       audio: '本地音频',
+      frames: '视频课件截图',
     };
     const parts = Object.entries(r.data.stores).map(
       ([key, v]) => `${names[key]} ${v.count} 条，内容约 ${size(v.bytes)}`,

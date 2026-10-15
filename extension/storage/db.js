@@ -2,18 +2,21 @@ let connection;
 function storageError(error) {
   if (error?.name === 'QuotaExceededError')
     return new Error(
-      '本地存储空间不足，结果未能保存。请先导出学习备份，再到设置中查看空间并清理缓存，避免反复请求模型。',
+      '本地存储空间不足，结果未能保存。请先导出学习备份及课件截图包，再到设置中查看空间并清理缓存，避免反复请求模型。',
     );
   return error;
 }
 export function db() {
   if (!connection)
     connection = new Promise((resolve, reject) => {
-      const req = indexedDB.open('cuemind', 3);
+      const req = indexedDB.open('cuemind', 4);
       req.onupgradeneeded = () => {
-        for (const n of ['videos', 'notes', 'chats', 'aiCache', 'audio'])
+        for (const n of ['videos', 'notes', 'chats', 'aiCache', 'audio', 'frames'])
           if (!req.result.objectStoreNames.contains(n))
             req.result.createObjectStore(n, { keyPath: 'id' });
+        const frames = req.transaction.objectStore('frames');
+        for (const key of ['recordId', 'videoKey'])
+          if (!frames.indexNames.contains(key)) frames.createIndex(key, key);
       };
       req.onsuccess = () => {
         req.result.onversionchange = () => {
@@ -67,7 +70,10 @@ export async function remove(store, id) {
 export async function deleteVideoHistory(videoKey) {
   const d = await db();
   return new Promise((resolve, reject) => {
-    const t = d.transaction(['videos', 'notes', 'chats', 'audio', 'aiCache'], 'readwrite');
+    const t = d.transaction(
+      ['videos', 'notes', 'chats', 'audio', 'aiCache', 'frames'],
+      'readwrite',
+    );
     const deletedRecordIds = new Set();
     // Cache keys are content hashes without video provenance; clear the shared
     // cache so deleted transcripts cannot remain in model responses.
@@ -76,7 +82,7 @@ export async function deleteVideoHistory(videoKey) {
     videos.onsuccess = () => {
       const cursor = videos.result;
       if (!cursor) {
-        for (const name of ['notes', 'chats', 'audio']) {
+        for (const name of ['notes', 'chats', 'audio', 'frames']) {
           const request = t.objectStore(name).openCursor();
           request.onsuccess = () => {
             const related = request.result;
@@ -106,7 +112,7 @@ export async function deleteVideoHistory(videoKey) {
 // Cursor traversal avoids loading all long-video records at once.
 export async function statistics() {
   const d = await db(),
-    stores = ['videos', 'notes', 'chats', 'aiCache', 'audio'];
+    stores = ['videos', 'notes', 'chats', 'aiCache', 'audio', 'frames'];
   const rows = await Promise.all(
     stores.map(
       (name) =>
@@ -120,10 +126,9 @@ export async function statistics() {
             const cursor = request.result;
             if (!cursor) return;
             count++;
-            bytes +=
-              name === 'audio'
-                ? cursor.value.bytes || 0
-                : new TextEncoder().encode(JSON.stringify(cursor.value)).byteLength;
+            bytes += ['audio', 'frames'].includes(name)
+              ? cursor.value.bytes || 0
+              : new TextEncoder().encode(JSON.stringify(cursor.value)).byteLength;
             cursor.continue();
           };
           transaction.oncomplete = () => resolve([name, { count, bytes }]);
@@ -139,7 +144,10 @@ export async function statistics() {
 export async function manage(action, transform) {
   const d = await db();
   return new Promise((resolve, reject) => {
-    const t = d.transaction(['videos', 'notes', 'chats', 'aiCache', 'audio'], 'readwrite');
+    const t = d.transaction(
+      ['videos', 'notes', 'chats', 'aiCache', 'audio', 'frames'],
+      'readwrite',
+    );
     t.oncomplete = resolve;
     t.onerror = () => reject(storageError(t.error));
     t.onabort = () => reject(storageError(t.error) || new Error('本地数据操作已回滚'));
@@ -148,6 +156,7 @@ export async function manage(action, transform) {
       return;
     }
     t.objectStore('aiCache').clear();
+    t.objectStore('frames').clear();
     if (action === 'reset') {
       for (const store of ['videos', 'notes', 'chats', 'audio']) t.objectStore(store).clear();
       return;

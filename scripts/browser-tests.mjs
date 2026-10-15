@@ -13,6 +13,7 @@ const tests = [
   'migu_clock',
   'replay_keyboard',
   'player_platform',
+  'materials_browser',
 ];
 for (const name of tests) {
   console.log(`Browser regression: ${name}`);

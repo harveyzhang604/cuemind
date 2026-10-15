@@ -765,6 +765,66 @@ dialog .close {
   font-size: 9px;
   margin-top: 5px;
 }
+#materials-dialog label {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+}
+#materials-dialog label.materials-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+#materials-dialog .materials-toggle input {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 3px 0 0;
+}
+#materials-dialog .row {
+  flex-wrap: wrap;
+}
+#materials-status {
+  color: var(--accent, #2f5a46);
+  line-height: 1.6;
+}
+#materials-results details {
+  border-top: 1px solid var(--line, #d9e2d6);
+  padding: 14px 0;
+}
+#materials-results summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+#materials-results pre {
+  white-space: pre;
+  overflow-x: auto;
+  max-height: 480px;
+  padding: 14px;
+  background: #edf2e9;
+  border-radius: 8px;
+  font:
+    13px/1.65 ui-monospace,
+    monospace;
+  tab-size: 4;
+}
+#materials-results a {
+  display: inline-block;
+  margin-top: 10px;
+}
+.materials-photo {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 10px 0;
+  border: 1px solid var(--line);
+}
+#materials-images {
+  margin: 16px 0;
+}
+#materials-image-list > details {
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
 .check {
   font-size: 12px;
 }

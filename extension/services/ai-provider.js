@@ -116,8 +116,19 @@ export async function asrHttpFailure(response) {
   failure.noSpeech = noSpeech;
   return failure;
 }
-export async function completion(settings, system, input, signal, capability = '') {
+export async function completion(settings, system, input, signal, capability = '', images = []) {
   const s = { ...defaults, ...settings };
+  if (
+    !Array.isArray(images) ||
+    images.length > 4 ||
+    images.some(
+      (image) =>
+        typeof image !== 'string' ||
+        image.length > 6_000_000 ||
+        !/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/.test(image),
+    )
+  )
+    throw new Error('画面图片格式或大小无效');
   const base = endpoint(s.baseUrl),
     model = s.models?.[capability] || s.model;
   if (!s.apiKey && !['localhost', '127.0.0.1'].includes(new URL(base).hostname))
@@ -130,7 +141,18 @@ export async function completion(settings, system, input, signal, capability = '
     headers['x-goog-api-key'] = s.apiKey;
     body = {
       system_instruction: { parts: [{ text: system }] },
-      contents: [{ role: 'user', parts: [{ text: JSON.stringify(input) }] }],
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: JSON.stringify(input) },
+            ...images.map((image) => {
+              const [header, data] = image.split(',');
+              return { inline_data: { mime_type: header.slice(5, header.indexOf(';')), data } };
+            }),
+          ],
+        },
+      ],
       generationConfig: { responseMimeType: 'application/json', maxOutputTokens: s.maxTokens },
     };
   } else {
@@ -140,7 +162,15 @@ export async function completion(settings, system, input, signal, capability = '
       model,
       messages: [
         { role: 'system', content: system },
-        { role: 'user', content: JSON.stringify(input) },
+        {
+          role: 'user',
+          content: images.length
+            ? [
+                { type: 'text', text: JSON.stringify(input) },
+                ...images.map((url) => ({ type: 'image_url', image_url: { url, detail: 'high' } })),
+              ]
+            : JSON.stringify(input),
+        },
       ],
       temperature: 0.2,
       max_tokens: s.maxTokens,
@@ -175,6 +205,12 @@ export async function completion(settings, system, input, signal, capability = '
       }
       const text = await limitedText(response);
       const data = JSON.parse(text);
+      if (
+        images.length &&
+        (data.choices?.[0]?.finish_reason === 'length' ||
+          data.candidates?.[0]?.finishReason === 'MAX_TOKENS')
+      )
+        throw new Error('本画面识别结果超过输出上限，未保存截断的代码。请提高输出上限后重试。');
       const result =
         s.provider === 'gemini'
           ? data.candidates?.[0]?.content?.parts?.map((x) => x.text || '').join('')

@@ -32,9 +32,27 @@ import { validateBackup } from './core/backup.js';
 import { keyFromUrl, matchesVideoUrl } from './core/video.js';
 import { captureClockProblem, planAsrSegments, skipRecognizedAudio } from './core/asr-progress.js';
 import { checkSpeechNetwork, speechSettings } from './services/speech.js';
+import { materialOptions, MATERIALS_MODEL, MATERIALS_VERSION } from './core/materials.js';
+import {
+  inspectVideoSource,
+  videoCandidates,
+  materialsMediaRule,
+} from './services/materials-source.js';
+import { saveMaterialFrame, materialFrames, materialFrameData } from './storage/frames.js';
+import { materialsSettings, recognizeMaterials, extractMaterials } from './services/materials.js';
+import {
+  readVideoFrame,
+  framePixels,
+  unpackFrameSignature,
+  seekBackgroundFrame,
+  primeBackgroundVideo,
+  cropVideoScreenshot,
+  hideMaterialOverlays,
+} from './services/video-frames.js';
 const tasks = new Map();
 const audioDownloads = new Map();
 let audioPlaybackQueue = Promise.resolve();
+let visualSession = null;
 let capture = null,
   restoring = false;
 setInterval(() => {
@@ -479,7 +497,7 @@ async function startVideoAudioDownload(recordId, tabId, retry = false) {
               else resolve();
             });
           });
-          while (capture && !controller.signal.aborted)
+          while ((capture || visualSession) && !controller.signal.aborted)
             await new Promise((resolve) => setTimeout(resolve, 250));
           if (controller.signal.aborted) throw new DOMException('已取消', 'AbortError');
           await chrome.tabs.update(target.id, { active: true });
@@ -528,6 +546,356 @@ async function player(tabId, data) {
   }
   if (!r?.ok) throw new Error(r?.error || '播放器没有响应，请刷新视频页面。');
   return r.data;
+}
+
+async function prepareBackgroundPage(record, session, signal) {
+  const source = new URL(record.videoInfo.url);
+  if (!matchesVideoUrl(record.videoKey, source.href)) throw new Error('视频链接与学习记录不符');
+  const tab = await chrome.tabs.create({ url: source.href, active: false });
+  session.helperTabId = tab.id;
+  await chrome.tabs.update(tab.id, { muted: true });
+  const deadline = Date.now() + 45000;
+  let primedAt = 0;
+  while (Date.now() < deadline) {
+    if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+    const current = await chrome.tabs.get(tab.id);
+    if (current.status === 'complete') {
+      if (Date.now() - primedAt > 2000) {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          world: 'MAIN',
+          func: primeBackgroundVideo,
+        });
+        primedAt = Date.now();
+      }
+      try {
+        const state = await player(tab.id, { action: 'state', videoKey: record.videoKey });
+        if (
+          state &&
+          !state.isAd &&
+          !state.unavailable &&
+          Number.isFinite(state.duration) &&
+          state.duration > 0 &&
+          state.readyState >= 2
+        ) {
+          await player(tab.id, { action: 'pause', videoKey: record.videoKey });
+          return { duration: state.duration };
+        }
+      } catch {
+        /* The content bridge may still be attaching. */
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  throw new Error('后台页面未能加载视频，请确认视频可访问后重试。');
+}
+
+async function extractBackgroundMaterials(m, record, options, original, config, session, signal) {
+  const token = crypto.randomUUID();
+  session.token = token;
+  session.run = {
+    status: 'running',
+    engine: 'background',
+    phase: 'downloading',
+    scope: options.mode,
+    received: 0,
+    total: 0,
+    detected: 0,
+    completed: 0,
+  };
+  const decoder = async (type, extra = {}) => {
+    const response = await chrome.runtime.sendMessage({
+      target: 'offscreen',
+      type,
+      token,
+      ...extra,
+    });
+    if (!response?.ok) throw new Error(response?.error || '后台视频解码器未响应');
+    return response.data;
+  };
+  const cancel = () => {
+    decoder('MATERIALS_CLOSE').catch(() => {});
+    if (session.helperTabId) chrome.tabs.remove(session.helperTabId).catch(() => {});
+  };
+  const rule = materialsMediaRule(chrome.runtime.id, record.videoInfo.platform);
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    let info;
+    try {
+      const response = await chrome.scripting.executeScript({
+        target: { tabId: m.tabId },
+        world: 'MAIN',
+        func: inspectVideoSource,
+        args: [record.videoKey],
+      });
+      if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+      const sources = videoCandidates(record.videoInfo.platform, response[0]?.result);
+      if (!sources.length)
+        throw new Error('平台暂未提供可直接读取的视频地址。未启动前台播放；已保存的内容仍可导出。');
+      if (rule)
+        await chrome.declarativeNetRequest.updateSessionRules({
+          removeRuleIds: [rule.id],
+          addRules: [rule],
+        });
+      if (!(await chrome.offscreen.hasDocument()))
+        await chrome.offscreen.createDocument({
+          url: 'offscreen/index.html',
+          reasons: ['BLOBS'],
+          justification:
+            '在独立后台文档中下载并解码用户主动提取的视频 Blob，快速检测课件与代码画面，不播放前台视频',
+        });
+      if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+      info = await decoder('MATERIALS_OPEN', { sources, duration: options.duration });
+    } catch (error) {
+      if (signal.aborted || /已切换|分 P 不符|记录不符/.test(error.message)) throw error;
+      await decoder('MATERIALS_CLOSE').catch(() => {});
+      session.run.phase = 'preparing-page';
+      notify({ event: 'materials-progress', recordId: record.id, run: session.run });
+      info = await prepareBackgroundPage(record, session, signal);
+      if (Math.abs(info.duration - options.duration) > Math.max(2, options.duration * 0.02))
+        throw new Error('后台视频时长与当前分 P 不符');
+    }
+    const bufferedFrames = [];
+    const end = Math.max(0, info.duration - 0.05),
+      run = record.videoMaterials?.run;
+    let time = ['beginning', 'all'].includes(options.mode)
+      ? options.mode === 'all' &&
+        ['beginning', 'all'].includes(run?.scope) &&
+        run.status !== 'done' &&
+        Number.isFinite(run.completedThrough)
+        ? Math.max(0, run.completedThrough - 1)
+        : 0
+      : original.time;
+    time = Math.min(end, time);
+    return await extractMaterials(record.videoMaterials, {
+      signal,
+      fast: true,
+      scope: options.mode,
+      // Backpressure stops requesting decoded frames; there is no playing video.
+      playback: async () => {},
+      save: async (data) => {
+        session.run = data.run;
+        const latest = await db.get('videos', record.id);
+        if (!latest) throw new Error('学习记录已删除，画面提取停止');
+        latest.videoMaterials = data;
+        await store(latest);
+        notify({ event: 'materials-progress', recordId: record.id, run: data.run });
+      },
+      saveFrame: (frame) =>
+        saveMaterialFrame({ ...frame, recordId: record.id, videoKey: record.videoKey }),
+      recognize: (frame, signal) => recognizeMaterials(frame, config, signal),
+      hydrateFrame: async (frame) => {
+        if (!session.helperTabId)
+          return (await decoder('MATERIALS_SNAPSHOT', { time: frame.time, frameId: frame.frameId }))
+            .image;
+        const result = await chrome.scripting.executeScript({
+          target: { tabId: session.helperTabId },
+          func: readVideoFrame,
+          args: [record.videoKey],
+        });
+        const snapshot = result[0]?.result;
+        if (!snapshot?.image || Math.abs(snapshot.time - frame.time) > 0.15)
+          throw new Error('平台限制后台截图，未启动前台播放。');
+        return snapshot.image;
+      },
+      captureFrame: async () => {
+        if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+        let frame;
+        if (session.helperTabId) {
+          const result = await chrome.scripting.executeScript({
+            target: { tabId: session.helperTabId },
+            func: seekBackgroundFrame,
+            args: [record.videoKey, time],
+          });
+          frame = result[0]?.result;
+          if (!frame?.preview) throw new Error('后台视频画面未就绪');
+          Object.assign(frame, await framePixels(frame.preview));
+          delete frame.preview;
+        } else {
+          if (!bufferedFrames.length) {
+            const times = [time];
+            if (info.lanes > 1 && time < end) times.push(Math.min(end, time + 0.6));
+            bufferedFrames.push(...(await decoder('MATERIALS_BATCH', { times })));
+          }
+          frame = bufferedFrames.shift();
+          frame.signature = await unpackFrameSignature(frame.signature);
+        }
+        frame.ended = time >= end;
+        time = Math.min(end, time + 0.6);
+        return frame;
+      },
+    });
+  } catch (error) {
+    session.run = {
+      ...session.run,
+      status: signal.aborted ? 'canceled' : 'failed',
+      error: signal.aborted ? '已停止后台提取，已保存的内容仍可导出。' : error.message,
+    };
+    if (['downloading', 'preparing-page'].includes(session.run.phase)) {
+      const latest = await db.get('videos', record.id);
+      if (latest) {
+        latest.videoMaterials ||= {
+          version: MATERIALS_VERSION,
+          model: MATERIALS_MODEL,
+          frames: [],
+        };
+        latest.videoMaterials.run = session.run;
+        await store(latest);
+      }
+    }
+    throw error;
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    await decoder('MATERIALS_CLOSE').catch(() => {});
+    if (session.helperTabId) {
+      const id = session.helperTabId;
+      session.helperTabId = null;
+      await chrome.tabs.remove(id).catch(() => {});
+    }
+    if (rule)
+      await chrome.declarativeNetRequest
+        .updateSessionRules({ removeRuleIds: [rule.id] })
+        .catch(() => {});
+  }
+}
+
+async function extractVideoMaterials(m) {
+  if (visualSession || capture) throw new Error('请先结束当前画面提取或音频采集任务。');
+  return locked(m.recordId, 'materials', async (signal) => {
+    // Reserve the player before the first await, including across different videos.
+    if (visualSession || capture) throw new Error('已有画面或音频采集任务正在进行。');
+    const session = { tabId: m.tabId, recordId: m.recordId };
+    visualSession = session;
+    let original,
+      record,
+      lockedPlayer = false;
+    try {
+      record = await requireRecord(m.recordId);
+      if (!['youtube', 'bilibili'].includes(record.videoInfo.platform))
+        throw new Error('视频代码与课件提取目前支持 YouTube 和 B站，请打开对应视频。');
+      const config = materialsSettings(await settings());
+      const tab = await chrome.tabs.get(m.tabId);
+      if (!matchesVideoUrl(record.videoKey, tab.url))
+        throw new Error('请先打开当前学习记录对应的视频页面。');
+      original = await player(m.tabId, { action: 'state', videoKey: record.videoKey });
+      if (
+        !original ||
+        original.isAd ||
+        original.unavailable ||
+        original.captureLocked ||
+        original.session
+      )
+        throw new Error('请等待正片加载，并结束复听或录音后再提取画面。');
+      const options = materialOptions(original.duration, m.options);
+      if (options.mode !== 'current')
+        return await extractBackgroundMaterials(
+          m,
+          record,
+          options,
+          original,
+          config,
+          session,
+          signal,
+        );
+      if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+      await player(m.tabId, { action: 'capture-lock', locked: true, videoKey: record.videoKey });
+      lockedPlayer = true;
+      const control = (action, extra = {}) =>
+        player(m.tabId, { action, ...extra, captureControl: true, videoKey: record.videoKey });
+      await control('pause');
+      const readyUntil = Date.now() + 30000;
+      while (true) {
+        if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+        const state = await control('state');
+        if (!state.seeking && state.readyState >= 2) break;
+        if (Date.now() >= readyUntil) throw new Error('等待视频画面超时，请先播放视频后重试。');
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      const save = async (data) => {
+        session.run = data.run;
+        // Merge only this field so independent watch progress / note updates survive.
+        const latest = await db.get('videos', record.id);
+        if (!latest) throw new Error('学习记录已删除，画面提取停止');
+        latest.videoMaterials = data;
+        await store(latest);
+        notify({ event: 'materials-progress', recordId: record.id, run: data.run });
+      };
+      return await extractMaterials(record.videoMaterials, {
+        signal,
+        current: options.mode === 'current',
+        scope: options.mode,
+        save,
+        saveFrame: (frame) =>
+          saveMaterialFrame({ ...frame, recordId: record.id, videoKey: record.videoKey }),
+        playback: (action) => control(action),
+        recognize: (frame, signal) => recognizeMaterials(frame, config, signal),
+        captureFrame: async () => {
+          if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+          const currentTab = await chrome.tabs.get(m.tabId);
+          if (!matchesVideoUrl(record.videoKey, currentTab.url))
+            throw new Error('视频已切换，画面提取停止');
+          const result = await chrome.scripting.executeScript({
+            target: { tabId: m.tabId },
+            func: readVideoFrame,
+            args: [record.videoKey],
+          });
+          const frame = result[0]?.result;
+          if (!frame || frame.buffering) return { buffering: true };
+          if (!frame.image) {
+            if (!currentTab.active)
+              throw new Error('此视频需要可见画面权限，请保持视频标签页在前台后继续。');
+            let screenshot;
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: m.tabId },
+                func: hideMaterialOverlays,
+                args: [true],
+              });
+              screenshot = await chrome.tabs.captureVisibleTab(currentTab.windowId, {
+                format: 'png',
+              });
+            } catch {
+              throw new Error('请点击 Chrome 工具栏的 CueMind 图标，授权当前视频画面后重试。');
+            } finally {
+              await chrome.scripting
+                .executeScript({
+                  target: { tabId: m.tabId },
+                  func: hideMaterialOverlays,
+                  args: [false],
+                })
+                .catch(() => {});
+            }
+            const active = (
+              await chrome.tabs.query({ active: true, windowId: currentTab.windowId })
+            )[0];
+            if (active?.id !== m.tabId || !matchesVideoUrl(record.videoKey, active.url))
+              throw new Error('标签页已切换，未发送其他页面的截图。请返回视频后继续。');
+            frame.image = await cropVideoScreenshot(screenshot, frame.rect, frame.viewport);
+          }
+          Object.assign(frame, await framePixels(frame.image));
+          return frame;
+        },
+      });
+    } finally {
+      if (lockedPlayer) {
+        const control = (action, extra = {}) =>
+          player(m.tabId, { action, ...extra, captureControl: true, videoKey: record.videoKey });
+        await control('pause').catch(() => {});
+        await control('seek', { time: original.time }).catch(() => {});
+        await control('rate', { rate: original.rate }).catch(() => {});
+        await control('capture-lock', { locked: false }).catch(() => {});
+        if (!original.paused) await control('play').catch(() => {});
+        // Automated scanning must not leave learning history at the end of the
+        // video merely because the panel received scan playback ticks.
+        await chrome.storage.local
+          .set({
+            ['watch:' + record.videoKey]: { time: original.time, updatedAt: Date.now() },
+          })
+          .catch(() => {});
+      }
+      if (visualSession === session) visualSession = null;
+    }
+  });
 }
 function makeRecord(info, raw, meta, id) {
   const miguAsr = info.platform === 'migu' && meta.source?.startsWith('whisper');
@@ -1005,6 +1373,26 @@ async function loadTranscript(m, signal) {
   return { record, tracks: data.tracks, needASR: !raw.length, warning: data.warning };
 }
 async function route(m) {
+  if (m.type === 'MATERIALS_EXTRACT') return extractVideoMaterials(m);
+  if (m.type === 'MATERIALS_IMAGE') {
+    await requireRecord(m.recordId);
+    return materialFrameData(m.recordId, m.imageId);
+  }
+  if (m.type === 'MATERIALS_GET') {
+    const record = await requireRecord(m.recordId);
+    let data = record.videoMaterials || null;
+    if (visualSession?.recordId === record.id && visualSession.run) {
+      data ||= { version: MATERIALS_VERSION, model: MATERIALS_MODEL, frames: [] };
+      data.run = visualSession.run;
+    }
+    return {
+      data,
+      images: await materialFrames(record.id),
+      running: [...tasks.values()].some(
+        (task) => task.recordId === record.id && task.capability === 'materials',
+      ),
+    };
+  }
   if (m.type === 'STORAGE_USAGE') {
     const stores = await db.statistics();
     const localBytes = await chrome.storage.local.getBytesInUse(null);
@@ -1592,6 +1980,7 @@ async function route(m) {
       return remember(await store(record));
     });
   if (m.type === 'CAPTURE_START') {
+    if (visualSession) throw new Error('请先结束视频代码与课件提取，再采集音频。');
     if (capture) throw new Error('已有音频识别正在进行');
     assertAvailable(m.recordId);
     const session = {
@@ -2006,6 +2395,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
   }
   if (['PLAYER_TICK', 'PAGE_CHANGED'].includes(m.type)) {
     if (sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return;
+    if (sender.tab.id === visualSession?.helperTabId) return;
     notify({ ...m, event: m.type, tabId: sender.tab.id });
     const s = capture;
     if (s?.started && s.tabId === sender.tab.id && !s.stopping) {
@@ -2031,6 +2421,19 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
       else if (m.paused)
         stopCapture(s.audioOnly ? { reason: '视频播放已暂停，完整音频尚未保存完毕。' } : {});
     }
+    return;
+  }
+  if (m.type === 'MATERIALS_DOWNLOAD_PROGRESS' && offscreen) {
+    if (visualSession?.token === m.token && visualSession.run?.phase === 'downloading') {
+      visualSession.run.received = Number(m.received) || 0;
+      visualSession.run.total = Number(m.total) || 0;
+      notify({
+        event: 'materials-progress',
+        recordId: visualSession.recordId,
+        run: visualSession.run,
+      });
+    }
+    reply({ ok: true });
     return;
   }
   if (m.type === 'CAPTURE_POSITION' && offscreen) {

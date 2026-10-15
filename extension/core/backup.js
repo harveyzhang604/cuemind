@@ -1,5 +1,6 @@
 import { normalizeFocusConfig, normalizeFocusCaches, focusCacheFor } from './focus.js';
 import { joinText } from './transcript.js';
+import { validateMaterials } from './materials.js';
 
 const object = (x) => x && typeof x === 'object' && !Array.isArray(x);
 const text = (x) => typeof x === 'string';
@@ -133,6 +134,7 @@ export function validateBackup(value) {
         }
         for (const chunk of Object.values(row.analysisChunks || {})) analysis(chunk);
         if (row.focusConfig !== undefined) row.focusConfig = normalizeFocusConfig(row.focusConfig);
+        if (row.videoMaterials !== undefined) validateMaterials(row.videoMaterials);
         // Imported AI results are not trusted as completed model work; exact marks are revalidated, progress recomputed.
         if (row.focusCache !== undefined || row.focusCaches !== undefined) {
           row.focusCaches = normalizeFocusCaches(

@@ -46,7 +46,17 @@
     "extension/services/tasks.js",
     "extension/services/wbi.js",
     "extension/storage/audio.js",
-    "extension/storage/db.js"
+    "extension/storage/db.js",
+    "extension/core/materials.js",
+    "extension/panel/materials-ui.js",
+    "extension/services/materials.js",
+    "extension/services/video-frames.js",
+    "extension/core/frame-changes.js",
+    "extension/core/materials-archive.js",
+    "extension/storage/frames.js",
+    "extension/services/materials-source.js",
+    "extension/offscreen/materials-decoder.js",
+    "extension/core/material-content.js"
   ],
   "documentation": [
     "CHANGELOG.md",
@@ -131,6 +141,10 @@
     "tests/ui_regression.py",
     "tests/zara-background.test.js",
     "tests/zara-integration.test.js",
-    "tests/zara_browser.py"
+    "tests/zara_browser.py",
+    "tests/materials.test.js",
+    "tests/materials_browser.py",
+    "tests/materials-source.test.js",
+    "tests/material-content.test.js"
   ]
 }
