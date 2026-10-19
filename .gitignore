@@ -196,3 +196,5 @@ __pycache__/
 !/tests/material-content.test.js
 
 !/tests/subtitle_language.py
+
+!/docs/USER_GUIDE.md
