@@ -13,8 +13,8 @@ with sync_playwright() as p:
   ctx=p.chromium.launch_persistent_context(profile,headless=True,**chromium_options(),args=[f'--disable-extensions-except={ROOT}/extension',f'--load-extension={ROOT}/extension','--autoplay-policy=no-user-gesture-required'])
   worker=ctx.service_workers[0] if ctx.service_workers else ctx.wait_for_event('serviceworker');eid=worker.url.split('/')[2]
   page=ctx.new_page()
-  response={'videoDetails':{'videoId':'fixture','title':'Native captions fixture','author':'CueMind','lengthSeconds':'12'},'microformat':{'playerMicroformatRenderer':{'defaultAudioLanguage':'en'}},'captions':{'playerCaptionsTracklistRenderer':{'captionTracks':[{'languageCode':'fr','name':{'simpleText':'French'},'baseUrl':'https://www.youtube.com/api/timedtext?v=fixture&lang=fr'},{'languageCode':'en','kind':'asr','name':{'simpleText':'English (auto-generated)'},'baseUrl':'https://www.youtube.com/api/timedtext?v=fixture&lang=en'}]}}}
-  html=f'<html><body><video controls src="data:audio/wav;base64,{audio}"></video><script>window.ytInitialPlayerResponse={json.dumps(response)}</script></body></html>'
+  response={'videoDetails':{'videoId':'fixture','title':'Native captions fixture','author':'CueMind','lengthSeconds':'12'},'microformat':{'playerMicroformatRenderer':{}},'captions':{'playerCaptionsTracklistRenderer':{'audioTracks':[{'audioTrackId':'ar.10'},{'audioTrackId':'en-US.4'}],'defaultAudioTrackIndex':0,'captionTracks':[{'languageCode':'fr','name':{'simpleText':'French'},'baseUrl':'https://www.youtube.com/api/timedtext?v=fixture&lang=fr'},{'languageCode':'en','kind':'asr','name':{'simpleText':'English (auto-generated)'},'baseUrl':'https://www.youtube.com/api/timedtext?v=fixture&lang=en'}]}}}
+  html=f'<html><body><video controls src="data:audio/wav;base64,{audio}"></video><div id="movie_player"></div><script>window.ytInitialPlayerResponse={json.dumps(response)};document.getElementById("movie_player").getAudioTrack=()=>({{id:"opaque-codec",renamedField:{{id:"en-US.4"}}}});</script></body></html>'
   caption_state={'empty':True,'requests':0}
   def youtube(route):
    if '/api/timedtext' in route.request.url:
@@ -42,6 +42,7 @@ with sync_playwright() as p:
   caption_state['empty']=False
   loaded=rpc('LOAD',tabId=tid,trackId='auto');assert loaded['ok'],loaded
   record=loaded['data']['record'];assert len(record['sentences'])==2
+  assert record['videoInfo']['audioLanguage']=='en-US'
   assert record['transcriptMeta']['language']=='en' and record['transcriptMeta']['isAi'] is True
   assert record['sentences'][1]['start']==3
   # Page scripts cannot read settings or keys through content-script messages.

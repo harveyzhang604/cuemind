@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {inspectPage,inspectAudioSource,canReuseTranscript,inferredSpokenLanguage,mismatchedOriginalTrack} from '../extension/services/platform.js';
+import {inspectPage,inspectAudioSource,canReuseTranscript,inferredSpokenLanguage,mismatchedOriginalTrack,matchesTranscriptTrack} from '../extension/services/platform.js';
 
 test('Chinese captions mismatch confirmed English audio, but a lesson title cannot establish its language',()=>{
  const info={platform:'bilibili',title:'【Easy English】日常英语口语练习',audioLanguage:'en'};
@@ -53,14 +53,14 @@ test('Bilibili audio source resolves the selected part and includes backup CDN U
  }finally{for(const [key,value] of Object.entries(previous)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}}
 });
 
-async function inspect({audio='en',playingAudio,tracks,selected=null,resources=[],requests=[]}){
+async function inspect({audio='en',playingAudio,tracks,audioTracks=[],defaultAudioTrackIndex,selected=null,resources=[],requests=[]}){
  const previous={document:globalThis.document,window:globalThis.window,location:globalThis.location,performance:globalThis.performance,fetch:globalThis.fetch};
- const response={videoDetails:{videoId:'fixture',title:'Fixture',lengthSeconds:'30'},microformat:{playerMicroformatRenderer:{defaultAudioLanguage:audio}},captions:{playerCaptionsTracklistRenderer:{captionTracks:tracks}}};
+ const response={videoDetails:{videoId:'fixture',title:'Fixture',lengthSeconds:'30'},microformat:{playerMicroformatRenderer:{defaultAudioLanguage:audio}},captions:{playerCaptionsTracklistRenderer:{captionTracks:tracks,audioTracks,defaultAudioTrackIndex}}};
  globalThis.performance={getEntriesByType:()=>resources.map(name=>({name}))};
  globalThis.fetch=async url=>{requests.push(String(url));return {ok:true,text:async()=>JSON.stringify({events:[{tStartMs:0,segs:[{utf8:'Fixture'}]}]})};};
  globalThis.location={hostname:'www.youtube.com',href:'https://www.youtube.com/watch?v=fixture'};
  globalThis.window={ytInitialPlayerResponse:response};
- globalThis.document={querySelector:()=>null,getElementById:()=>({getPlayerResponse:()=>response,getAudioTrack:()=>playingAudio?{languageCode:playingAudio}:null})};
+ globalThis.document={querySelector:()=>null,getElementById:()=>({getPlayerResponse:()=>response,getAudioTrack:()=>typeof playingAudio==='string'?{languageCode:playingAudio}:playingAudio})};
  try{return await inspectPage(selected,'youtube:fixture:1');}
  finally{for(const [k,v] of Object.entries(previous)){if(v===undefined)delete globalThis[k];else globalThis[k]=v;}}
 }
@@ -73,9 +73,9 @@ test('Manual captions win within the same audio language; regional languages mat
  const result=await inspect({audio:'en-US',tracks:[track('en',true),track('fr'),track('en-GB')]});
  assert.equal(result.tracks[0].id,'2');assert.equal(result.tracks[1].id,'0');
 });
-test('Current dubbed audio takes precedence over default audio metadata',async()=>{
+test('Actual dubbed audio is recorded while English subtitles remain the learning default',async()=>{
  const result=await inspect({playingAudio:'ja',tracks:[track('en'),track('ja',true)]});
- assert.equal(result.info.audioLanguage,'ja');assert.equal(result.tracks[0].language,'ja');
+ assert.equal(result.info.audioLanguage,'ja');assert.equal(result.tracks[0].language,'en');
 });
 test('Unknown audio language does not invent English as the source',async()=>{
  const result=await inspect({audio:'',tracks:[track('ja',true),track('fr')]});
@@ -125,4 +125,34 @@ test('Migu reads the actual programme, rejects stale programme IDs and makes no 
  } finally {
   for (const [key,value] of Object.entries(previous)) {if(value===undefined)delete globalThis[key];else globalThis[key]=value;}
  }
+});
+
+
+test('YouTube reads a minified current-audio descriptor instead of the first of 21 subtitle languages',async()=>{
+ const result=await inspect({audio:'',playingAudio:{id:'opaque-codec-id',WI:{id:'en-US.4',isDefault:true}},audioTracks:[{audioTrackId:'ar.10'},{audioTrackId:'en-US.4'}],defaultAudioTrackIndex:1,tracks:[track('ar',true),track('pl',true),track('en',true)]});
+ assert.equal(result.info.audioLanguage,'en-US');assert.equal(result.tracks[0].language,'en');
+});
+test('YouTube uses the default audio-track index when no current-track method is available',async()=>{
+ const result=await inspect({audio:'',audioTracks:[{audioTrackId:'ar.10'},{audioTrackId:'en-US.4'}],defaultAudioTrackIndex:1,tracks:[track('ar',true),track('en',true)]});
+ assert.equal(result.info.audioLanguage,'en-US');assert.equal(result.tracks[0].language,'en');
+});
+test('a current dubbed track descriptor overrides default English metadata and does not depend on the minified field name',async()=>{
+ const result=await inspect({audio:'en',playingAudio:{id:'opaque-codec-id',differentName:{id:'ar.10'}},audioTracks:[{audioTrackId:'ar.10'},{audioTrackId:'en-US.4'}],defaultAudioTrackIndex:1,tracks:[track('en',true),track('ar',true)]});
+ assert.equal(result.info.audioLanguage,'ar');assert.equal(result.tracks[0].language,'en');
+});
+test('reordered numeric track IDs never reuse captions from another language or caption type',()=>{
+ const record={rawCaptions:[{}],transcriptMeta:{source:'youtube_native',trackId:'0',language:'ar',isAi:true}};
+ const english={id:'0',language:'en',isAi:true};
+ assert.equal(matchesTranscriptTrack(record,english),false);assert.equal(canReuseTranscript(record,[english]),false);
+ assert.equal(matchesTranscriptTrack({...record,transcriptMeta:{...record.transcriptMeta,language:'en',isAi:false}},english),false);
+ assert.equal(matchesTranscriptTrack({...record,transcriptMeta:{...record.transcriptMeta,language:'en'}},english),true);
+ assert.equal(mismatchedOriginalTrack({platform:'youtube',audioLanguage:'en-US'},{language:'ar'}),true);
+ assert.equal(mismatchedOriginalTrack({platform:'youtube',audioLanguage:'en-US'},{language:'en'}),false);
+});
+
+test('English is preferred even without audio metadata, while other platform languages remain selectable',async()=>{
+ const result=await inspect({audio:'',tracks:[track('ar',true),track('en',true)]});
+ assert.equal(result.info.audioLanguage,'');assert.equal(result.tracks[0].language,'en');
+ const selected=await inspect({audio:'',tracks:[track('ar',true),track('en',true)],selected:'0'});
+ assert.equal(selected.track.language,'ar');
 });

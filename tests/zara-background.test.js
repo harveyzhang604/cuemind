@@ -7,11 +7,11 @@ import {defaults} from '../extension/services/ai-provider.js';
 import {groundedTranslation} from '../extension/services/tasks.js';
 import {validateBackup} from '../extension/core/backup.js';
 import {validateSettings} from '../extension/services/settings.js';
-import {normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION} from '../extension/core/transcript.js';
+import {normalizeCaptions,parseJSON3,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION} from '../extension/core/transcript.js';
 import {localSentences,paragraphs} from '../extension/core/sentence.js';
 import {keyFromUrl,matchesVideoUrl} from '../extension/core/video.js';
 import {captureClockProblem,planAsrSegments,skipRecognizedAudio} from '../extension/core/asr-progress.js';
-import {canReuseTranscript,mismatchedOriginalTrack} from '../extension/services/platform.js';
+import {canReuseTranscript,mismatchedOriginalTrack,matchesTranscriptTrack,matchesAudioLanguage} from '../extension/services/platform.js';
 import {taskConflict} from '../extension/core/task-lock.js';
 import {clearLearningCache,dataActions} from '../extension/core/local-data.js';
 import {recoverEquivalentLearning,recoverOrphanedFocus} from '../extension/core/record-recovery.js';
@@ -23,7 +23,7 @@ async function fixture(existingStorage){
  const audioClips=async key=>[...stores.audio.values()].filter(clip=>!key||clip.videoKey===key).map(({blob,...clip})=>clip);
  const audioCoverage=clips=>({ranges:clips.map(clip=>({start:clip.start,end:clip.end}))});
  const saveAudio=async clip=>{stores.audio.set(clip.videoKey+':'+clip.segmentId,{...clip,id:clip.videoKey+':'+clip.segmentId,bytes:clip.blob.size});};
- const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,ReadableStream,Blob,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,mismatchedOriginalTrack,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,audioClips,audioCoverage,saveAudio,getAudio:async id=>stores.audio.get(id),fetch,inspectAudioSource:()=>{},
+ const context={checkSpeechNetwork:async()=>({status:405}),speechSettings,groundedTranslation,console,URL,DOMException,AbortController,ReadableStream,Blob,structuredClone,crypto:globalThis.crypto,Date,Map,Set,setInterval:noop,setTimeout:()=>1,clearTimeout:noop,defaults,validateSettings,normalizeCaptions,parseJSON3,deduplicateAsrCaptions,splitTimedCaptions,splitAsrCaptions,videoKey,SCHEMA_VERSION,localSentences,paragraphs,keyFromUrl,matchesVideoUrl,captureClockProblem,planAsrSegments,skipRecognizedAudio,canReuseTranscript,mismatchedOriginalTrack,matchesTranscriptTrack,matchesAudioLanguage,selectFocusConfig,taskConflict,clearLearningCache,dataActions,recoverEquivalentLearning,recoverOrphanedFocus,inspection,audioClips,audioCoverage,saveAudio,getAudio:async id=>stores.audio.get(id),fetch,inspectAudioSource:()=>{},
  db:{get:async(name,id)=>structuredClone(stores[name].get(id)),all:async name=>structuredClone([...stores[name].values()]),put:async(name,value)=>{stores[name].set(value.id,structuredClone(value));return value;},remove:async(name,id)=>stores[name].delete(id),deleteVideoHistory:async key=>{const ids=[...stores.videos.values()].filter(v=>v.videoKey===key).map(v=>v.id);for(const [name,store] of Object.entries(stores)){if(name==='aiCache'){store.clear();continue;}for(const [id,value] of store)if(value.videoKey===key||ids.includes(value.recordId))store.delete(id);}return ids;},updateNote:async(id,expected,change)=>{const n=stores.notes.get(id);if(n?.updatedAt!==expected)return null;const next={...n,...change};stores.notes.set(id,structuredClone(next));return next;},manage:async(action,transform)=>{if(action==='reset'){Object.values(stores).forEach(s=>s.clear());}else if(action==='delete-notes')stores.notes.clear();else{stores.chats.clear();for(const [id,r]of stores.videos)stores.videos.set(id,transform(r));}}},
  chrome:{storage:{local:{setAccessLevel:noop,get:async k=>({[k]:storage[k]}),set:async v=>Object.assign(storage,v),remove:async k=>{delete storage[k];},clear:async()=>Object.keys(storage).forEach(k=>delete storage[k])}},sidePanel:{setPanelBehavior:noop},action:{onClicked:{addListener:noop}},scripting:{executeScript:async()=>[{result:[]}]},tabs:{get:async()=>({id:1,url:inspection.info.url,status:'complete'}),query:async()=>[{id:1,url:inspection.info.url,status:'complete'}],create:async({url})=>({id:2,url,status:'complete'}),update:async()=>{},remove:async()=>{},sendMessage:async()=>({ok:true,data:{time:.6,isAd:false}}),onRemoved:{addListener:noop}},permissions:{contains:async()=>true},runtime:{id:'fixture',getURL:path=>'chrome-extension://fixture/'+path,sendMessage:async()=>{},onMessage:{addListener:fn=>listeners.push(fn)}}}};
  context.cachedCompletion=(...args)=>context.completion(...args.slice(0,5));
@@ -638,4 +638,75 @@ test('saved-audio retry completes translation in the background before reporting
       (segment) => segment.id === 'translated-gap' && segment.status === 'done',
     ),
   );
+});
+
+
+test('automatic YouTube loading replaces cached Arabic Supadata captions after resolving English audio',async()=>{
+ const f=await fixture();f.inspection.info.audioLanguage='';let calls=0;
+ f.context.fetchSupadata=async()=>({raw:normalizeCaptions([{start:0,end:2,text:'نص عربي'}]),language:'ar'});
+ const old=await f.route({type:'LOAD',tabId:1});
+ assert.equal(old.record.transcriptMeta.language,'ar');
+ f.inspection.info.audioLanguage='en-US';
+ f.context.fetchSupadata=async info=>{calls++;assert.equal(info.audioLanguage,'en');return {raw:normalizeCaptions([{start:0,end:2,text:'My thesis is that labs create space.'}]),language:'en'};};
+ const corrected=await f.route({type:'LOAD',tabId:1});
+ assert.equal(corrected.record.transcriptMeta.language,'en');assert.equal(calls,1);
+ assert.notEqual(corrected.record.id,old.record.id);assert.ok(f.stores.videos.has(old.record.id));
+ assert.equal(f.storage['lastRecord:'+corrected.record.videoKey],corrected.record.id);
+ const reused=await f.route({type:'LOAD',tabId:1});
+ assert.equal(reused.record.id,corrected.record.id);assert.equal(calls,1);
+});
+
+test('a reused native numeric track ID cannot return old Arabic captions from either cache path',async()=>{
+ const f=await fixture();f.storage.settings.transcriptProvider='platform';
+ f.inspection.info.audioLanguage='ar';f.inspection.tracks=[{id:'0',language:'ar',isAi:true}];
+ f.inspection.json3={events:[{tStartMs:0,dDurationMs:2000,segs:[{utf8:'نص عربي'}]}]};
+ const old=await f.route({type:'LOAD',tabId:1,trackId:'0'});
+ old.record.transcriptMeta.selectedByUser=false;f.stores.videos.set(old.record.id,structuredClone(old.record));
+ assert.equal(old.record.transcriptMeta.language,'ar');
+ f.inspection.info.audioLanguage='en-US';f.inspection.tracks=[{id:'0',language:'en',isAi:true}];
+ f.inspection.json3={events:[{tStartMs:0,dDurationMs:2000,segs:[{utf8:'An English original.'}]}]};
+ const result=await f.route({type:'LOAD',tabId:1});
+ assert.equal(result.record.transcriptMeta.language,'en');assert.match(result.record.rawCaptions[0].text,/English/);
+ assert.notEqual(result.record.id,old.record.id);assert.ok(f.stores.videos.has(old.record.id));
+});
+
+test('confirmed English audio does not automatically load only-Arabic platform subtitles',async()=>{
+ const f=await fixture();f.storage.settings.transcriptProvider='platform';
+ f.inspection.info.audioLanguage='en-US';f.inspection.tracks=[{id:'0',language:'ar',isAi:true}];
+ const result=await f.route({type:'LOAD',tabId:1});
+ assert.equal(result.needASR,true);assert.equal(result.record.rawCaptions.length,0);
+ assert.equal(result.record.transcriptMeta.source,'youtube_audio');
+ const explicit=await f.route({type:'LOAD',tabId:1,trackId:'0'});
+ assert.equal(explicit.record.transcriptMeta.selectedByUser,true);
+});
+
+
+test('a user can switch Supadata to Arabic or English and the explicit language choice survives reopening',async()=>{
+ const f=await fixture();f.inspection.tracks=[{id:'1',language:'en',isAi:true},{id:'0',language:'ar',isAi:true}];
+ const requested=[];f.context.fetchSupadata=async info=>{requested.push(info.audioLanguage);return {raw:normalizeCaptions([{start:0,end:2,text:info.audioLanguage==='ar'?'نص عربي':'English original.'}]),language:info.audioLanguage};};
+ const english=await f.route({type:'LOAD',tabId:1});assert.equal(english.record.transcriptMeta.language,'en');
+ const arabic=await f.route({type:'LOAD',tabId:1,trackId:'0'});assert.equal(arabic.record.transcriptMeta.language,'ar');assert.equal(arabic.record.transcriptMeta.selectedByUser,true);
+ assert.equal((await f.route({type:'LOAD',tabId:1})).record.id,arabic.record.id);
+ const again=await f.route({type:'LOAD',tabId:1,trackId:'1'});assert.equal(again.record.transcriptMeta.language,'en');assert.equal(again.record.transcriptMeta.selectedByUser,true);
+ assert.equal((await f.route({type:'LOAD',tabId:1})).record.id,again.record.id);
+ assert.deepEqual(requested,['en','ar']);
+ const explicitProvider=await f.route({type:'LOAD',tabId:1,trackId:'supadata:ar'});assert.equal(explicitProvider.record.transcriptMeta.language,'ar');
+});
+
+
+test('no English in the configured subtitle service still returns the native language picker',async()=>{
+ const f=await fixture();f.inspection.tracks=[{id:'0',language:'fr',isAi:true}];
+ f.context.fetchSupadata=async()=>{throw Object.assign(new Error('No English captions'),{status:404});};
+ const result=await f.route({type:'LOAD',tabId:1});
+ assert.equal(result.needsTrackSelection,true);assert.equal(result.record.rawCaptions.length,0);
+ assert.equal(result.tracks[0].language,'fr');assert.match(result.warning,/字幕语言/);
+});
+
+
+test('wrong-language service results expose the picker instead of hiding available platform English',async()=>{
+ const f=await fixture();f.inspection.tracks=[{id:'1',language:'en',isAi:true},{id:'0',language:'ar',isAi:true}];
+ f.context.fetchSupadata=async()=>{throw Object.assign(new Error('Wrong language'),{subtitleLanguage:true});};
+ const result=await f.route({type:'LOAD',tabId:1});
+ assert.equal(result.needsTrackSelection,true);assert.equal(result.record.rawCaptions.length,0);
+ assert.equal(result.tracks.length,2);
 });

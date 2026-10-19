@@ -1,10 +1,24 @@
-// Runs in the page's MAIN world. Never pass provider keys into this function.
+// Native track positions can change between player responses. A numeric ID
+// alone must never authorize reusing captions from a different language.
+export function matchesTranscriptTrack(record, track) {
+  const meta = record?.transcriptMeta || {};
+  if (!track || meta.trackId !== track.id) return false;
+  if (
+    meta.language &&
+    track.language &&
+    meta.language.toLowerCase() !== track.language.toLowerCase()
+  )
+    return false;
+  if (typeof meta.isAi === 'boolean' && typeof track.isAi === 'boolean' && meta.isAi !== track.isAi)
+    return false;
+  return true;
+}
 export function canReuseTranscript(record, tracks) {
   if (!record?.rawCaptions?.length) return false;
   const meta = record.transcriptMeta || {};
   if (meta.source === 'import' || meta.source?.startsWith('whisper') || meta.selectedByUser)
     return true;
-  return !!tracks[0] && meta.trackId === tracks[0].id;
+  return matchesTranscriptTrack(record, tracks[0]);
 }
 
 // A lesson title describes its subject, not its spoken language. Only use
@@ -13,8 +27,18 @@ export function inferredSpokenLanguage(info) {
   return typeof info.audioLanguage === 'string' ? info.audioLanguage : '';
 }
 
+export function matchesAudioLanguage(info, language) {
+  const base = (value) =>
+    String(value || '')
+      .replace(/^ai-/, '')
+      .toLowerCase()
+      .split('-')[0];
+  const audio = base(inferredSpokenLanguage(info));
+  return !audio || (!!base(language) && audio === base(language));
+}
+
 export function mismatchedOriginalTrack(info, track) {
-  if (!track || info.platform !== 'bilibili') return false;
+  if (!track || !['youtube', 'bilibili'].includes(info.platform)) return false;
   const spoken = inferredSpokenLanguage(info).toLowerCase().split('-')[0];
   const caption = String(track.language || '')
     .replace(/^ai-/, '')
@@ -165,9 +189,40 @@ export async function inspectPage(trackId, expectedKey, signedPlayerUrl) {
     try {
       playingAudio = document.getElementById('movie_player')?.getAudioTrack?.();
     } catch {}
+    const captionList = data.captions?.playerCaptionsTracklistRenderer || {};
+    const captionAudioTracks = captionList.audioTracks || [];
+    // YouTube sometimes returns an opaque current-track ID and a descriptor
+    // under a minified property name (for example {WI:{id:'en-US.4'}}).
+    // Match descriptor IDs to the response's audio tracks, without depending
+    // on that property's unstable name or confusing caption language with audio.
+    const audioLanguageFromId = (value) =>
+      typeof value === 'string'
+        ? value.match(/^([a-z]{2,3}(?:-[a-z0-9]{2,8})*)\.\d+$/i)?.[1] || ''
+        : '';
+    const descriptors =
+      playingAudio && typeof playingAudio === 'object'
+        ? [
+            playingAudio,
+            ...Object.values(playingAudio).filter(
+              (value) => value && typeof value === 'object' && !Array.isArray(value),
+            ),
+          ]
+        : [];
+    const currentAudioId = descriptors
+      .flatMap((value) => [value.audioTrackId, value.id])
+      .find(
+        (id) =>
+          typeof id === 'string' && captionAudioTracks.some((track) => track.audioTrackId === id),
+      );
+    const defaultAudio = Number.isInteger(captionList.defaultAudioTrackIndex)
+      ? captionAudioTracks[captionList.defaultAudioTrackIndex]
+      : null;
     const preferredLanguage =
       playingAudio?.languageCode ||
+      audioLanguageFromId(currentAudioId) ||
+      audioLanguageFromId(playingAudio?.audioTrackId || playingAudio?.id) ||
       data.microformat?.playerMicroformatRenderer?.defaultAudioLanguage ||
+      audioLanguageFromId(defaultAudio?.audioTrackId) ||
       '';
     info.audioLanguage = preferredLanguage;
     const tracks = rankTracks(
@@ -179,6 +234,11 @@ export async function inspectPage(trackId, expectedKey, signedPlayerUrl) {
         url: t.baseUrl,
       })),
       preferredLanguage,
+    );
+    // The learning default is English whenever that caption track exists;
+    // explicit user choices still address every available platform track.
+    tracks.sort(
+      (a, b) => Number(!sameLanguage(a.language, 'en')) - Number(!sameLanguage(b.language, 'en')),
     );
     if (trackId == null) return { info, tracks, source: 'youtube_native' };
     const track = tracks.find((t) => t.id === trackId) || tracks[0];

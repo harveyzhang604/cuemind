@@ -388,7 +388,7 @@ async function load(refresh = false, trackId) {
     captureInfo = captured;
     recording = !!captured;
     renderCapture();
-    if (captured?.tabId === tab.id) {
+    if (captured?.tabId === tab.id && captured.recordId === record.id) {
       record = await rpc('GET_RECORD', { recordId: captured.recordId });
       if (gen !== generation) return;
     }
@@ -399,6 +399,7 @@ async function load(refresh = false, trackId) {
       status(
         data.warning || (data.needASR ? '没有找到可用字幕，可以导入字幕或生成 ASR 字幕。' : ''),
       );
+    if (data.needsTrackSelection) $('#subtitle-language').click();
     if (['youtube', 'bilibili'].includes(record.videoInfo.platform))
       rpc('SAVE_VIDEO_AUDIO', { recordId: record.id, tabId: tab.id }).catch(() => {});
     await bindPlayer();
@@ -437,22 +438,28 @@ function renderTracks(tracks = availableTracks) {
           ? meta.selectedByUser
             ? '使用你手动选择的字幕轨道。'
             : record.videoInfo.audioLanguage
-              ? '优先匹配当前音频语言，再优先人工字幕。'
+              ? record.videoInfo.platform === 'youtube'
+                ? '默认优先英文字幕；在字幕语言中可以选择其他语言。'
+                : '优先匹配当前音频语言，再优先人工字幕。'
               : '平台未提供音频语言，当前轨道不保证是原始语言；可在字幕设置中选择来源。'
           : '';
   }
   const select = $('#tracks');
   select.replaceChildren();
+  const meta = record?.transcriptMeta || {};
+  const currentTrack =
+    tracks.find((track) => track.id === (meta.nativeTrackId || meta.trackId)) ||
+    (meta.source === 'supadata_native' && tracks.find((track) => track.language === meta.language));
   for (const t of tracks) {
     const o = el('option', '', t.label + (t.isAi ? ' · 平台自动' : ' · 人工'));
     o.value = t.id;
-    o.selected = t.id === record?.transcriptMeta.trackId;
+    o.selected = t.id === currentTrack?.id;
     select.append(o);
   }
   if (record?.videoInfo.platform === 'youtube' && settings.supadataApiKey) {
     const o = el('option', '', 'Supadata · 平台原生字幕');
     o.value = 'supadata';
-    o.selected = record.transcriptMeta.source === 'supadata_native';
+    o.selected = record.transcriptMeta.source === 'supadata_native' && !currentTrack;
     select.append(o);
   }
   if (
@@ -474,7 +481,31 @@ function renderTracks(tracks = availableTracks) {
     o.disabled = true;
     select.append(o);
   }
+  for (const language of meta.availableLangs || []) {
+    if (tracks.some((track) => track.language === language)) continue;
+    let name = language;
+    try {
+      name = new Intl.DisplayNames(['zh-CN'], { type: 'language' }).of(language) || language;
+    } catch {}
+    const option = el('option', '', name + ' · 备用字幕');
+    option.value = 'supadata:' + language;
+    option.selected =
+      meta.source === 'supadata_native' && meta.language === language && !currentTrack;
+    select.append(option);
+  }
   select.hidden = !select.options.length;
+  const languageButton = $('#subtitle-language');
+  languageButton.hidden = !record || !['youtube', 'bilibili'].includes(record.videoInfo.platform);
+  let languageName = meta.language?.replace(/^ai-/, '') || '';
+  try {
+    if (languageName)
+      languageName =
+        new Intl.DisplayNames(['zh-CN'], { type: 'language' }).of(languageName) || languageName;
+  } catch {}
+  languageButton.textContent = languageName ? '字幕：' + languageName : '字幕语言';
+  languageButton.title = '选择字幕语言；有英文时默认优先英文';
+  $('#subtitle-language-help').textContent =
+    `可选 ${tracks.length || meta.availableLangs?.length || 0} 条平台字幕。有英文时默认优先英文，也可手动选择其他语言，选择后会记住。原文／双语／译文只改变显示方式。`;
 }
 async function hydrate(gen = generation) {
   const id = record?.id,
@@ -2062,7 +2093,11 @@ function download(text, extName, mime = 'text/plain') {
 }
 $('#refresh').onclick = guard(() => load());
 $('#start').onclick = guard(() => load());
-$('#tracks').onchange = guard(() => load(false, $('#tracks').value));
+$('#tracks').onchange = guard(async () => {
+  const trackId = $('#tracks').value;
+  $('#subtitle-settings-dialog').close();
+  await load(false, trackId);
+});
 $('#settings').onclick = () =>
   ext ? chrome.runtime.openOptionsPage() : location.assign('settings.html');
 function syncModeControls() {
@@ -3552,6 +3587,11 @@ function closeTools() {
 $('#subtitle-settings').onclick = () => {
   closeTools();
   $('#subtitle-settings-dialog').showModal();
+};
+$('#subtitle-language').onclick = () => {
+  closeTools();
+  $('#subtitle-settings-dialog').showModal();
+  $('#tracks').focus();
 };
 $('#open-focus-settings').onclick = () => {
   $('#subtitle-settings-dialog').close();

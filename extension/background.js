@@ -10,6 +10,8 @@ import {
   inspectPage,
   inspectAudioSource,
   canReuseTranscript,
+  matchesTranscriptTrack,
+  matchesAudioLanguage,
   mismatchedOriginalTrack,
 } from './services/platform.js';
 import {
@@ -1219,26 +1221,32 @@ async function loadTranscript(m, signal) {
   let data = await page(m.tabId, null, m.videoKey);
   const key = videoKey(data.info),
     cfg = await settings();
+  const supadataLanguage = /^supadata:([a-z]{2,3}(?:-[a-z0-9]{2,8})*)$/i.exec(m.trackId || '')?.[1];
+  const automatic = !m.trackId || m.trackId === 'auto';
+  const youtube = data.info.platform === 'youtube';
   const autoTrack = data.tracks?.[0];
+  const englishTrack = youtube && data.tracks.find((track) => /^en(?:-|$)/i.test(track.language));
+  const chosenTrack = !automatic && data.tracks.find((track) => track.id === m.trackId);
+  const sourceInfo = youtube
+    ? { ...data.info, audioLanguage: chosenTrack?.language || supadataLanguage || 'en' }
+    : data.info;
   const translatedTrackOnly =
-    (!m.trackId || m.trackId === 'auto') && mismatchedOriginalTrack(data.info, autoTrack);
+    automatic && (youtube ? !englishTrack : mismatchedOriginalTrack(data.info, autoTrack));
   if (translatedTrackOnly)
-    data.warning =
-      '当前字幕语言与平台提供的原声音频语言不一致。请使用音频识别生成原文，或在字幕设置中手动选择轨道。';
-  else if (
-    data.info.platform === 'bilibili' &&
-    !data.info.audioLanguage &&
-    autoTrack &&
-    (!m.trackId || m.trackId === 'auto')
-  )
+    data.warning = youtube
+      ? '未找到英文原文字幕，请点击「字幕语言」选择平台提供的语言，或识别视频音频。'
+      : '当前字幕语言与平台提供的原声音频语言不一致。请使用音频识别生成原文，或在字幕设置中手动选择轨道。';
+  else if (data.info.platform === 'bilibili' && !data.info.audioLanguage && autoTrack && automatic)
     data.warning =
       'B站未提供原声语言，当前展示平台字幕，尚未确认是否为原文。若与播放语言不同，请选择原文轨道或识别音频。';
   const useSupadata =
-    data.info.platform === 'youtube' &&
+    youtube &&
     (m.trackId === 'supadata' ||
-      (cfg.transcriptProvider === 'supadata' && (!m.trackId || m.trackId === 'auto')));
+      !!supadataLanguage ||
+      (cfg.transcriptProvider === 'supadata' && automatic));
   const allowSupadata =
-    useSupadata || (cfg.transcriptProvider === 'fallback' && (!m.trackId || m.trackId === 'auto'));
+    useSupadata ||
+    (['fallback', 'supadata'].includes(cfg.transcriptProvider) && (automatic || !!chosenTrack));
   const ensureVideo = async () => {
     if (signal.aborted) throw new DOMException('已取消', 'AbortError');
     if (!matchesVideoUrl(key, (await chrome.tabs.get(m.tabId)).url))
@@ -1257,7 +1265,12 @@ async function loadTranscript(m, signal) {
     if (
       saved?.schemaVersion === SCHEMA_VERSION &&
       !m.refresh &&
-      (!translatedTrackOnly || savedIsOriginalChoice) &&
+      (!translatedTrackOnly ||
+        savedIsOriginalChoice ||
+        (youtube &&
+          allowSupadata &&
+          saved.transcriptMeta?.source === 'supadata_native' &&
+          matchesAudioLanguage(sourceInfo, saved.transcriptMeta.language))) &&
       ((saved.transcriptMeta?.source === 'supadata_native' &&
         saved.transcriptMeta.selectedByUser) ||
         (canReuseTranscript(saved, data.tracks) &&
@@ -1267,7 +1280,7 @@ async function loadTranscript(m, signal) {
             saved.transcriptMeta?.selectedByUser)) ||
         (allowSupadata &&
           saved.transcriptMeta?.source === 'supadata_native' &&
-          (!data.info.audioLanguage || saved.transcriptMeta.language === data.info.audioLanguage)))
+          matchesAudioLanguage(sourceInfo, saved.transcriptMeta.language)))
     ) {
       await ensureVideo();
       saved.videoInfo = {
@@ -1288,10 +1301,17 @@ async function loadTranscript(m, signal) {
     ? null
     : data.tracks.find((t) => t.id === m.trackId) || data.track || data.tracks[0];
   let id = useSupadata
-    ? `${key}:supadata:${data.info.audioLanguage || 'auto'}`
+    ? `${key}:supadata:${sourceInfo.audioLanguage || 'auto'}`
     : `${key}:${translatedTrackOnly ? 'original-audio' : track?.id || 'default'}`;
   const cached = await db.get('videos', id);
-  if (cached?.rawCaptions?.length && !m.refresh && cached.schemaVersion === SCHEMA_VERSION) {
+  if (
+    cached?.rawCaptions?.length &&
+    !m.refresh &&
+    cached.schemaVersion === SCHEMA_VERSION &&
+    (useSupadata
+      ? matchesAudioLanguage(sourceInfo, cached.transcriptMeta?.language)
+      : !track || matchesTranscriptTrack(cached, track))
+  ) {
     await ensureVideo();
     if (m.trackId && m.trackId !== 'auto') {
       cached.transcriptMeta.selectedByUser = true;
@@ -1314,23 +1334,38 @@ async function loadTranscript(m, signal) {
   }
   let supadataResult = null;
   if (!raw.length && data.info.platform === 'youtube' && allowSupadata) {
-    const supadataId = `${key}:supadata:${data.info.audioLanguage || 'auto'}`;
+    const supadataId = `${key}:supadata:${sourceInfo.audioLanguage || 'auto'}`;
     const saved = await db.get('videos', supadataId);
-    if (saved?.rawCaptions?.length && saved.schemaVersion === SCHEMA_VERSION && !m.refresh) {
+    if (
+      saved?.rawCaptions?.length &&
+      saved.schemaVersion === SCHEMA_VERSION &&
+      !m.refresh &&
+      matchesAudioLanguage(sourceInfo, saved.transcriptMeta?.language)
+    ) {
       await ensureVideo();
+      if (chosenTrack) {
+        saved.transcriptMeta.selectedByUser = true;
+        saved.transcriptMeta.nativeTrackId = chosenTrack.id;
+        await store(saved);
+      }
       await remember(saved);
       return { record: saved, tracks: data.tracks, cached: true };
     }
     try {
       if (!(await chrome.permissions.contains({ origins: ['https://api.supadata.ai/*'] })))
         throw new Error('请在设置中保存 Supadata 配置并授予服务域名访问权限。');
-      supadataResult = await fetchSupadata(data.info, cfg, { signal });
+      supadataResult = await fetchSupadata(sourceInfo, cfg, { signal });
       raw = supadataResult.raw;
       id = supadataId;
       data = { ...data, source: 'supadata_native', warning: '' };
     } catch (e) {
-      if (useSupadata || signal.aborted) throw e;
-      data.warning = `平台字幕不可用；${e.message}`;
+      const chooseLanguage =
+        automatic && data.tracks.length && (e.subtitleLanguage || [206, 404].includes(e.status));
+      if (signal.aborted || (useSupadata && !chooseLanguage)) throw e;
+      if (chooseLanguage) {
+        data.languageSelectionRequired = true;
+        data.warning = `${e.message} 请点击「字幕语言」选择其他语言。`;
+      } else data.warning = `平台字幕不可用；${e.message}`;
     }
   }
   if (signal.aborted) throw new DOMException('已取消', 'AbortError');
@@ -1346,7 +1381,7 @@ async function loadTranscript(m, signal) {
             r.transcriptMeta?.selectedByUser ||
             r.transcriptMeta?.source === 'import' ||
             r.transcriptMeta?.source?.startsWith('whisper')) &&
-          (track ? r.transcriptMeta?.trackId === track.id : canReuseTranscript(r, data.tracks)),
+          (track ? matchesTranscriptTrack(r, track) : canReuseTranscript(r, data.tracks)),
       )
       .sort((a, b) => b.updatedAt - a.updatedAt);
     if (alternatives.length) return { record: alternatives[0], tracks: data.tracks, cached: true };
@@ -1356,13 +1391,23 @@ async function loadTranscript(m, signal) {
     data.info,
     raw,
     {
-      source: translatedTrackOnly ? 'bilibili_audio' : data.source,
+      source: supadataResult
+        ? 'supadata_native'
+        : translatedTrackOnly
+          ? `${data.info.platform}_audio`
+          : data.source,
       trackId: supadataResult ? 'supadata' : track?.id,
       language: supadataResult?.language || track?.language,
       isAi: supadataResult ? null : track?.isAi,
       availableLangs: supadataResult?.availableLangs,
+      nativeTrackId: track?.id,
       selectedByUser: !!m.trackId && m.trackId !== 'auto',
-      selectionReason: data.info.audioLanguage ? 'audio-language' : 'available-track',
+      selectionReason:
+        youtube && automatic
+          ? 'english-preferred'
+          : data.info.audioLanguage
+            ? 'audio-language'
+            : 'available-track',
     },
     id,
   );
@@ -1370,7 +1415,18 @@ async function loadTranscript(m, signal) {
     selectFocusConfig(record, { overlay: true, overlayLanguage: 'bilingual' });
   await store(record);
   if (raw.length) await remember(record);
-  return { record, tracks: data.tracks, needASR: !raw.length, warning: data.warning };
+  return {
+    record,
+    tracks: data.tracks,
+    needASR: !raw.length,
+    needsTrackSelection:
+      youtube &&
+      automatic &&
+      !raw.length &&
+      !!data.tracks.length &&
+      (!englishTrack || data.languageSelectionRequired),
+    warning: data.warning,
+  };
 }
 async function route(m) {
   if (m.type === 'MATERIALS_EXTRACT') return extractVideoMaterials(m);

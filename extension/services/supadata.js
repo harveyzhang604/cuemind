@@ -1,16 +1,20 @@
 import { normalizeCaptions } from '../core/transcript.js';
 import { limitedText } from './ai-provider.js';
+import { matchesAudioLanguage } from './platform.js';
 
 const API = 'https://api.supadata.ai/v1/transcript';
 const fail = (status) =>
-  new Error(
-    {
-      206: 'Supadata 没有找到平台原生字幕。可导入字幕或使用语音转写。',
-      401: 'Supadata API Key 无效，请在设置中检查。',
-      403: 'Supadata 访问被拒绝，请检查账号权限或视频公开状态。',
-      404: 'Supadata 未找到视频或原生字幕。',
-      429: 'Supadata 请求受限或额度不足，请检查账号后重试。',
-    }[status] || `Supadata 返回 HTTP ${status}，请稍后重试。`,
+  Object.assign(
+    new Error(
+      {
+        206: 'Supadata 没有找到平台原生字幕。可导入字幕或使用语音转写。',
+        401: 'Supadata API Key 无效，请在设置中检查。',
+        403: 'Supadata 访问被拒绝，请检查账号权限或视频公开状态。',
+        404: 'Supadata 未找到视频或原生字幕。',
+        429: 'Supadata 请求受限或额度不足，请检查账号后重试。',
+      }[status] || `Supadata 返回 HTTP ${status}，请稍后重试。`,
+    ),
+    { status },
   );
 export function parseSupadata(data) {
   const result = data?.result || data;
@@ -73,21 +77,31 @@ export async function fetchSupadata(
       }, pollMs);
       controller.signal.addEventListener('abort', canceled, { once: true });
     });
+  const parsed = (data) => {
+    const result = parseSupadata(data);
+    if (!matchesAudioLanguage(info, result.language))
+      throw Object.assign(
+        new Error('Supadata 返回的字幕与所选语言不一致，未保存。请重试或选择其他字幕来源。'),
+        { subtitleLanguage: true },
+      );
+    return result;
+  };
   try {
     const url = new URL(API);
     url.searchParams.set('url', `https://www.youtube.com/watch?v=${info.videoId}`);
     url.searchParams.set('text', 'false');
     url.searchParams.set('mode', 'native');
-    if (info.audioLanguage) url.searchParams.set('lang', info.audioLanguage);
+    if (info.audioLanguage)
+      url.searchParams.set('lang', info.audioLanguage.split('-')[0].toLowerCase());
     const response = await read(url.href);
-    if (response.status !== 202) return parseSupadata(response.data);
+    if (response.status !== 202) return parsed(response.data);
     const jobId = response.data?.jobId;
     if (typeof jobId !== 'string' || !jobId || jobId.length > 300)
       throw new Error('Supadata 异步任务 ID 无效。');
     for (let i = 0; i < maxPolls; i++) {
       await wait();
       const { data } = await read(`${API}/${encodeURIComponent(jobId)}`);
-      if (data.status === 'completed') return parseSupadata(data);
+      if (data.status === 'completed') return parsed(data);
       if (data.status === 'failed') throw new Error('Supadata 字幕任务失败，请稍后重试。');
       if (!['queued', 'active'].includes(data.status))
         throw new Error('Supadata 返回未知任务状态。');

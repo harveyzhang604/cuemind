@@ -3431,3 +3431,16 @@ main,
   max-height: 340px;
   overflow-y: auto;
 }
+
+/* Keep language choice beside the original/bilingual display selector. */
+.transcript-toolbar .subtitle-language {
+  flex: 0 1 auto;
+  max-width: 100px;
+  min-width: 0;
+  padding: 4px 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--green);
+}

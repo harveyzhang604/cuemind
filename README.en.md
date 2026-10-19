@@ -22,6 +22,8 @@ Bring your own model account and API key. Learning records stay on your device. 
 
 *Actual UI using CueMind's original built-in demo. Emphasis comes from a manual glossary, with no model request. The demo supports reading, notes, and export; it does not connect to a video player.*
 
+**1.0.60:** The subtitle-language control beside the display selector lists available languages. YouTube prefers English when available; manual choices are remembered, and missing English prompts a choice. Supadata requests and validates the chosen language. Incompatible automatic caches are bypassed without deleting earlier learning records.
+
 ## Install
 
 Use **desktop Chrome 116 or later**. You do not need Node.js, Python, or a build step for ordinary installation. CueMind currently installs as an unpacked extension.

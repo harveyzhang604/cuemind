@@ -194,3 +194,5 @@ __pycache__/
 
 !/extension/core/material-content.js
 !/tests/material-content.test.js
+
+!/tests/subtitle_language.py

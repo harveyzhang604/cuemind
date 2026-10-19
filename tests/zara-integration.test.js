@@ -47,3 +47,12 @@ test('legacy backup without subtitle provider preserves current Supadata prefere
  assert.equal(restored.transcriptProvider,'fallback');assert.equal(restored.supadataApiKey,'fixture-current');assert.equal(restored.apiKey,'fixture-ai');assert.equal(restored.asrKey,'fixture-asr');
  const explicit=restoreSettings({...legacy,transcriptProvider:'platform'},current);assert.equal(explicit.transcriptProvider,'platform');assert.equal(explicit.supadataApiKey,'fixture-current');
 });
+
+
+test('Supadata requests the base audio language and refuses a different or missing returned language',async()=>{
+ const english={...info,audioLanguage:'en-US'};
+ const result=await fetchSupadata(english,cfg,{fetchImpl:async url=>{assert.equal(new URL(url).searchParams.get('lang'),'en');return Response.json({...content,lang:'en'});}});
+ assert.equal(result.language,'en');
+ for(const lang of ['ar',''])await assert.rejects(fetchSupadata(english,cfg,{fetchImpl:async()=>Response.json({...content,lang})}),/字幕与所选语言不一致/);
+ await assert.rejects(fetchSupadata(english,cfg,{pollMs:1,fetchImpl:async url=>Response.json(url.includes('/transcript/')?{status:'completed',...content,lang:'ar'}:{jobId:'job'},{status:url.includes('/transcript/')?200:202})}),/字幕与所选语言不一致/);
+});

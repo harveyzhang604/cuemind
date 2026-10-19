@@ -75,6 +75,17 @@
                   <option value="translated">译文</option>
                 </select></span
               >
+              <button
+                id="subtitle-language"
+                class="text-btn subtitle-language"
+                type="button"
+                aria-label="选择字幕语言"
+                aria-haspopup="dialog"
+                aria-controls="subtitle-settings-dialog"
+                hidden
+              >
+                字幕语言
+              </button>
               <div class="focus-entry-group"><span class="focus-entry-label">重点：</span></div>
             </div>
             <div class="transcript-utility-controls">
@@ -454,9 +465,11 @@
       <h2 id="subtitle-settings-title">字幕设置</h2>
       <p id="source" class="hint"></p>
       <label class="subtitle-source-label"
-        >字幕来源<select id="tracks" aria-label="字幕语言轨道" hidden></select
+        >字幕语言<select id="tracks" aria-label="字幕语言轨道" hidden></select
       ></label>
-      <p class="hint">选择使用哪份原始字幕。原文／双语／译文只改变显示方式。</p>
+      <p id="subtitle-language-help" class="hint">
+        有英文时默认优先英文，也可选择其他字幕语言。原文／双语／译文只改变显示方式。
+      </p>
       <button id="open-focus-settings" class="button">重点词、字号与视频字幕</button>
     </dialog>
     <dialog id="import-dialog" aria-labelledby="import-title">

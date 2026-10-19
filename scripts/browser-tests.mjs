@@ -7,6 +7,7 @@ const tests = [
   'panel_race',
   'panel_follow',
   'compact_workflow',
+  'subtitle_language',
   'explanation_modal',
   'zara_browser',
   'bilibili_follow',
